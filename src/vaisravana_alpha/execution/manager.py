@@ -402,30 +402,48 @@ class WaveManager:
     # ── Close ─────────────────────────────────────────────────────────────
 
     def close(self, wave: Wave, reason: str, price: float,
-             wallet=None) -> Optional[dict]:
-        """Close a wave, log it, charge close fee, credit PnL, start cooldown.
+             wallet=None, fraction: float = 1.0) -> Optional[dict]:
+        """Close a wave (or a fraction of it), log, charge fee, credit PnL.
 
-        Returns a small dict of realized economics (for notify/telemetry)
-        or None if the wave is already gone.
+        `fraction` < 1.0 performs a partial close: the wave stays open with
+        reduced size, and a proportional share of PnL and fee is booked. This
+        is what the real-time exit engine uses when its confidence is moderate
+        (close 50%, trail the rest) rather than maximal.
+
+        Returns a dict of realized economics, or None if already gone.
         """
         if wave.wave_id not in self.waves and wave.state in (
                 WaveState.WAVE_BREAK, WaveState.KILL, WaveState.CLOSE):
-            # already closed this tick (e.g. kill_all) — skip double close
             return None
 
-        wave.state = WaveState.WAVE_BREAK
-        wave.close_reason = reason
-        wave.closed_ts = time.time()
+        fraction = max(0.0, min(1.0, fraction))
+        full_close = fraction >= 0.999
+
+        # For a partial close, reduce size but keep the wave alive.
+        if not full_close and wave.size > 0:
+            closed_size = wave.size * fraction
+            wave.size -= closed_size
+            wave.notional = wave.notional * (1.0 - fraction)
+            # open_fee is sunk cost; only charge close fee on the closed part.
+            close_notional = wave.notional + closed_size * (
+                wave.entry_price if wave.entry_price else 0
+            ) * 0  # placeholder; see below
+            close_notional = closed_size * (wave.entry_price or 0)
+        else:
+            close_notional = wave.notional
+
+        wave.state = WaveState.WAVE_BREAK if full_close else wave.state
+        wave.close_reason = reason if full_close else f"{reason} (partial {fraction:.0%})"
+        if full_close:
+            wave.closed_ts = time.time()
         wave.live_r = self._calc_r(wave, price)
 
-        # ── Paper economics: close fee + realized PnL ──────────────
+        # ── Paper economics ──
         econ = {"pnl": 0.0, "close_fee": 0.0, "net": 0.0}
-        if wallet is not None and wave.notional > 0:
-            close_fee = wallet.charge_close_fee(wave.notional)
+        if wallet is not None and close_notional > 0:
+            close_fee = wallet.charge_close_fee(close_notional)
             econ["close_fee"] = close_fee
-            # gross PnL in USD: R * risk_per_R, where risk = notion * SL-fraction.
-            # SL distance (R) = |entry - anchor|; PnL = live_r * notional * (|entry-anchor|/entry)
-            risk_per_r = wave.notional * (
+            risk_per_r = close_notional * (
                 abs(wave.entry_price - wave.anchor) / wave.entry_price
             ) if wave.entry_price else 0.0
             gross = wave.live_r * risk_per_r
@@ -434,34 +452,35 @@ class WaveManager:
             econ["pnl"] = round(net, 4)
             econ["net"] = round(net, 4)
 
-        if self.conn:
+        if full_close and self.conn:
             try:
                 log_wave_close(self.conn, wave, econ=econ)
             except Exception as e:
                 log.warning("log_wave_close failed: %s", e)
 
-        # Feed realized net PnL to the adaptive throttle so the per-hour cap
-        # can rise (positive expectancy) or fall (negative) automatically.
+        # Feed realized net PnL to the adaptive throttle
         try:
             from vaisravana_alpha.strategy.survival import record_close
             record_close(econ["net"])
         except Exception:
             pass
 
-        # Per-wave cooldown
-        key = (wave.pair, wave.side)
-        self.cooldowns[key] = time.time() + COOLDOWN_S
+        if full_close:
+            key = (wave.pair, wave.side)
+            self.cooldowns[key] = time.time() + COOLDOWN_S
+            self.waves.pop(wave.wave_id, None)
+            self._break_start.pop(wave.wave_id, None)
+            self._conf_break_start.pop(wave.wave_id, None)
+            extra = ""
+            if wallet is not None:
+                extra = f" net={econ['net']:+.4f} bal={wallet.balance:.4f}"
+            log.info("WAVE CLOSE %s %s reason=%s r=%.2f%s",
+                     wave.pair, wave.side, wave.close_reason,
+                     wave.live_r, extra)
+        else:
+            log.info("WAVE PARTIAL %s %s fraction=%.0f%% live_r=%.2f",
+                     wave.pair, wave.side, fraction * 100, wave.live_r)
 
-        # Clean up
-        self.waves.pop(wave.wave_id, None)
-        self._break_start.pop(wave.wave_id, None)
-        self._conf_break_start.pop(wave.wave_id, None)
-
-        extra = ""
-        if wallet is not None:
-            extra = f" net={econ['net']:+.4f} bal={wallet.balance:.4f}"
-        log.info("WAVE CLOSE %s %s reason=%s r=%.2f%s",
-                 wave.side, wave.pair, reason, wave.live_r, extra)
         return econ
 
     # ── Scaling ───────────────────────────────────────────────────────────
@@ -543,6 +562,15 @@ class WaveManager:
         """Return all SURFING/ENTERED waves."""
         return [w for w in self.waves.values()
                 if w.state in (WaveState.SURFING, WaveState.ENTERED)]
+
+    def get_open_wave(self, pair: str) -> Wave | None:
+        """Return the open wave for a single pair, or None."""
+        for w in self.waves.values():
+            if w.pair == pair and w.state in (
+                WaveState.SURFING, WaveState.ENTERED
+            ):
+                return w
+        return None
 
     def get_open_count(self) -> int:
         return len(self.get_open_waves())

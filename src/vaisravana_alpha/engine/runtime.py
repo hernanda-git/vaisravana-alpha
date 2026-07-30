@@ -26,6 +26,8 @@ from vaisravana_alpha.core.models import Tick
 from vaisravana_alpha.core.params import ParameterSurface
 from vaisravana_alpha.core.settings import Settings
 from vaisravana_alpha.engine.context import ContextStore
+from vaisravana_alpha.engine.exit_engine import ExitAction
+from vaisravana_alpha.execution.broker import ModeGuard
 from vaisravana_alpha.execution.manager import WaveManager
 from vaisravana_alpha.execution.risk import KillSwitch, PairExcluder
 from vaisravana_alpha.execution.wallet import PaperWallet
@@ -119,6 +121,14 @@ class AlphaEngine:
         self._feed: FeedMux | None = None
         self._poller: RestPoller | None = None
         self._last_heartbeat = 0.0
+
+        # Real-time exit engine. Optional; only active when exit_enabled.
+        self.exit_engine = None
+        self.exit_pair = settings.exit_pair
+        if settings.exit_enabled:
+            from vaisravana_alpha.engine.exit_engine import ExitEngine
+            self.exit_engine = ExitEngine()
+            self._exit_last_eval: dict[str, float] = {}
 
     # -- agentic telemetry -------------------------------------------------
 
@@ -234,10 +244,81 @@ class AlphaEngine:
         # Exits run unconditionally. Suppressing entries must never leave an
         # open position unmanaged.
         await self._manage_open_waves(pair, tick, ctx, bias, confidence)
+
+        # Real-time exit engine (optional). Evaluates every N ms per pair and
+        # may close positions before the structural TP/SL would. This is the
+        # fee-aware, regime-adaptive exit path.
+        if self.exit_engine is not None:
+            self._evaluate_exit(pair, tick, ctx)
+
         self.manager.tick_cooldowns()
         self._refresh_shared_state()
         self._check_wallet()
         self._heartbeat()
+
+    def _evaluate_exit(self, pair: str, tick, ctx) -> None:
+        """Run the real-time exit engine for one pair, on its own cadence.
+
+        The exit engine processes every tick internally but we only *act* on
+        its signal every `exit_tick_interval_ms` to avoid thrashing. This is a
+        deliberate decoupling: the engine sees all ticks, the runtime acts on
+        a schedule it controls.
+        """
+        # Limit to a single pair if configured.
+        if self.exit_pair and pair != self.exit_pair:
+            return
+
+        now_ms = time.time() * 1000
+        last = self._exit_last_eval.get(pair, 0.0)
+        interval = self.settings.exit_tick_interval_ms
+        if now_ms - last < interval:
+            # Still feed the engine so its regime detector stays current.
+            if self.manager.get_open_wave(pair):
+                self.exit_engine.process(tick, ctx, self.manager.get_open_wave(pair))
+            return
+
+        self._exit_last_eval[pair] = now_ms
+
+        wave = self.manager.get_open_wave(pair)
+        if not wave:
+            return
+
+        try:
+            signal = self.exit_engine.process(tick, ctx, wave)
+        except Exception as exc:
+            log.debug("exit engine failed for %s: %s", pair, exc)
+            return
+
+        # Record the signal for telemetry / post-trade learning.
+        self._record_exit_signal(pair, signal)
+
+        if signal.action in (ExitAction.CLOSE_50, ExitAction.CLOSE_100):
+            reason = (
+                f"rt-exit:{signal.regime.value}:conf={signal.exit_conf:.2f}"
+            )
+            econ = self.manager.close(
+                wave, reason, tick.price, self.wallet,
+                fraction=(0.5 if signal.action == ExitAction.CLOSE_50 else 1.0),
+            )
+            self.state.closes += 1
+            self._record_trade(wave, econ)
+            log.info(
+                "REAL-TIME EXIT %s %s @ %.8f conf=%.2f regime=%s salvage=%.4f",
+                signal.action.value, pair, tick.price,
+                signal.exit_conf, signal.regime.value, signal.salvage,
+            )
+
+    def _record_exit_signal(self, pair: str, signal) -> None:
+        """Persist exit signals for later learning analysis."""
+        if self.agentic is None or not self.run_id:
+            return
+        try:
+            from vaisravana_alpha.storage import agentic as _agentic
+            _agentic.record_exit_signal(
+                self.agentic, self.run_id, pair, signal,
+            )
+        except Exception as exc:
+            log.debug("exit signal telemetry failed: %s", exc)
 
     def _entries_allowed(self, pair: str, ctx, confidence: float) -> bool:
         """Admission control. Every branch can only ever reject.

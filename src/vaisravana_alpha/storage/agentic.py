@@ -192,6 +192,27 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_dec_created ON decisions(created_ts DESC);
 
+-- ── exit_signals ────────────────────────────────────────────────────────
+-- Every real-time exit signal emitted while a position was open. The audit
+-- trail that lets the learning layer judge whether an exit was early, late,
+-- or correct after the trade has closed.
+CREATE TABLE IF NOT EXISTS exit_signals (
+    signal_id    TEXT PRIMARY KEY,
+    run_id       TEXT NOT NULL,
+    pair         TEXT NOT NULL,
+    ts           REAL NOT NULL,
+    regime       TEXT NOT NULL,
+    exit_conf    REAL NOT NULL,
+    action       TEXT NOT NULL,
+    salvage      REAL,
+    factors      TEXT NOT NULL DEFAULT '{}',
+    weights      TEXT NOT NULL DEFAULT '{}',
+    reason       TEXT DEFAULT '',
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_xsig_run  ON exit_signals(run_id);
+CREATE INDEX IF NOT EXISTS idx_xsig_pair ON exit_signals(pair, ts);
+
 -- ── schema_meta ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
@@ -453,6 +474,31 @@ def record_evaluation(conn: sqlite3.Connection, run_id: str, layer: int,
         (eval_id, run_id, layer, layer_name, verdict, score,
          json.dumps(metrics, sort_keys=True, default=str),
          json.dumps(reasons), time.time()),
+    )
+    conn.commit()
+    return eval_id
+
+
+def record_exit_signal(conn: sqlite3.Connection, run_id: str, pair: str,
+                       signal) -> str:
+    """Persist a real-time exit signal for post-trade learning analysis.
+
+    The exit engine emits many signals per second; this table is the audit
+    trail that lets the learning layer answer "was exiting at conf=0.82 the
+    right call?" after the trade closes.
+    """
+    eval_id = new_id("xsig")
+    conn.execute(
+        """INSERT INTO exit_signals (signal_id, run_id, pair, ts, regime,
+               exit_conf, action, salvage, factors, weights, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            eval_id, run_id, pair, signal.ts, signal.regime.value,
+            signal.exit_conf, signal.action.value, signal.salvage,
+            json.dumps(signal.factors.to_dict(), sort_keys=True),
+            json.dumps(signal.weights_used, sort_keys=True),
+            signal.reason[:200],
+        ),
     )
     conn.commit()
     return eval_id

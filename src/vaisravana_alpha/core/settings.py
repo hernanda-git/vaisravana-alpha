@@ -122,6 +122,11 @@ class Settings:
     max_open_waves: int = 8
     max_wave_age_s: int = 900
 
+    # -- exit engine -------------------------------------------------------
+    exit_enabled: bool = False          # enable real-time exit engine
+    exit_pair: str = ""                 # single pair for exit engine (empty = all)
+    exit_tick_interval_ms: int = 200     # how often to evaluate exit signal
+
     # -- notifications -----------------------------------------------------
     telegram_token: str = ""
     telegram_chat_id: str = ""
@@ -198,6 +203,9 @@ def load_settings() -> Settings:
         warmup_s=env_float("WARMUP_S", 90.0),
         max_open_waves=env_int("MAX_OPEN_WAVES", 8),
         max_wave_age_s=env_int("MAX_WAVE_AGE_S", 900),
+        exit_enabled=env_bool("EXIT_ENGINE", False),
+        exit_pair=env_str("EXIT_PAIR", ""),
+        exit_tick_interval_ms=env_int("EXIT_TICK_INTERVAL_MS", 200),
         telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("NOTIFY_CHAT_ID", ""),
         telegram_listen=env_bool("CMD_LISTEN", True),
