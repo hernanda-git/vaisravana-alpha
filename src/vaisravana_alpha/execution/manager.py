@@ -445,7 +445,7 @@ class WaveManager:
         wave.live_r = self._calc_r(wave, price)
 
         # ── Paper economics ──
-        econ = {"pnl": 0.0, "close_fee": 0.0, "net": 0.0}
+        econ = {"pnl": 0.0, "close_fee": 0.0, "net": 0.0, "exit_price": price}
         if wallet is not None and close_notional > 0:
             close_fee = wallet.charge_close_fee(close_notional)
             econ["close_fee"] = close_fee
