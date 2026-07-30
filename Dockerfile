@@ -7,16 +7,12 @@ FROM python:3.12-slim AS builder
 WORKDIR /build
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
 
-# Dependencies are installed from pyproject alone before the source is copied,
-# so editing a strategy file does not invalidate the dependency layer.
+# Source copied before install so the package that gets installed is the real
+# one, not the placeholder. (An earlier build installed the empty touch'd
+# __init__.py and the COPY never reached the install prefix.)
 COPY pyproject.toml README.md ./
-RUN mkdir -p src/vaisravana_alpha \
- && touch src/vaisravana_alpha/__init__.py \
- && pip install --prefix=/install .
-
 COPY src/ src/
-RUN pip install --prefix=/install --no-deps .
-
+RUN pip install --prefix=/install .
 
 FROM python:3.12-slim AS runtime
 

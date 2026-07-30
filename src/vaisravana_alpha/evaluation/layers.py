@@ -228,21 +228,29 @@ def evaluate_execution(run: dict, trades: list[dict],
     total_rejections = sum(r.get("total", 0) for r in rejections)
     top_gate = rejections[0] if rejections else None
 
-    # A single gate owning nearly all rejections is a misconfiguration
-    # signature, not selectivity.
-    if top_gate and total_rejections > 100:
-        share = top_gate["total"] / total_rejections
+    # Warmup rejections are expected and must not read as misconfiguration.
+    # They are a time gate, not a selectivity failure; the execution layer
+    # only worries about gates that persist after warmup has elapsed.
+    post_warmup = [r for r in rejections if r.get("gate") != "warmup"]
+    post_total = sum(r.get("total", 0) for r in post_warmup)
+    top_gate_post = post_warmup[0] if post_warmup else None
+
+    # A single gate owning nearly all post-warmup rejections is a
+    # misconfiguration signature, not selectivity.
+    if top_gate_post and post_total > 100:
+        share = top_gate_post["total"] / post_total
         if share > 0.95 and opens == 0:
             verdict = FAIL
             reasons.append(
-                f"gate '{top_gate['gate']}' rejected {share:.0%} of "
-                f"{total_rejections} candidates and nothing traded: "
+                f"gate '{top_gate_post['gate']}' rejected {share:.0%} of "
+                f"{post_total} post-warmup candidates and nothing traded: "
                 f"almost certainly misconfigured"
             )
         elif share > 0.90:
             verdict = WARN if verdict == PASS else verdict
             reasons.append(
-                f"gate '{top_gate['gate']}' dominates rejections ({share:.0%})"
+                f"gate '{top_gate_post['gate']}' dominates post-warmup "
+                f"rejections ({share:.0%})"
             )
 
     if opens == 0 and duration_h > 1.0:

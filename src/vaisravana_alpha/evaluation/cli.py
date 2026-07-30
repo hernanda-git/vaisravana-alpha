@@ -25,8 +25,13 @@ from vaisravana_alpha.storage import agentic
 
 
 def _open(db_path: str) -> sqlite3.Connection:
+    # The engine writes to this database continuously (one row per trade,
+    # per minute heartbeat). The CLI reads concurrently, so it must wait for
+    # the writer rather than failing immediately -- a "database is locked"
+    # from a read would be a self-inflicted denial of service.
     conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
