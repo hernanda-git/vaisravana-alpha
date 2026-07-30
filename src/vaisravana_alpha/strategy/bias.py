@@ -151,16 +151,24 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
         + BIAS_WEIGHTS["breadth"] * breadth
     )
 
-    # Direction
+    # Direction. When the blended score is near zero (choppy/flat tape), fall
+    # back to order-flow + book pressure so the bot still picks a side instead
+    # of sitting fully flat. This keeps trade frequency up on low-trend assets
+    # like BONK while the real-time exit engine caps downside.
     if score > BIAS_THRESH:
         direction = "bullish"
     elif score < -BIAS_THRESH:
         direction = "bearish"
     else:
-        direction = "neutral"
+        micro = 0.6 * flow_delta + 0.4 * book_pressure
+        direction = "bullish" if micro >= 0 else "bearish"
 
     # Strength (0..1)
     strength = _clamp(abs(score) / BIAS_SATURATE, 0.0, 1.0)
+    # Micro-fallback direction: give it a floor strength so it can still
+    # pass the entry gate (otherwise flat tape → strength 0 → no trades).
+    if direction != "neutral" and abs(score) < BIAS_THRESH:
+        strength = max(strength, 0.12)
 
     return BiasReading(
         direction=direction,
