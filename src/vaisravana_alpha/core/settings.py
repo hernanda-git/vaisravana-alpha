@@ -130,6 +130,7 @@ class Settings:
     # -- notifications -----------------------------------------------------
     telegram_token: str = ""
     telegram_chat_id: str = ""
+    telegram_enabled: bool = True
     telegram_listen: bool = True
     bot_username: str = ""
 
@@ -206,8 +207,9 @@ def load_settings() -> Settings:
         exit_enabled=env_bool("EXIT_ENGINE", False),
         exit_pair=env_str("EXIT_PAIR", ""),
         exit_tick_interval_ms=env_int("EXIT_TICK_INTERVAL_MS", 200),
-        telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        telegram_chat_id=os.getenv("NOTIFY_CHAT_ID", ""),
+        telegram_token=os.getenv("TG_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", "")),
+        telegram_chat_id=os.getenv("TG_CHAT_ID", os.getenv("NOTIFY_CHAT_ID", "")),
+        telegram_enabled=env_bool("TG_ENABLED", env_bool("TELEGRAM_ENABLED", True)),
         telegram_listen=env_bool("CMD_LISTEN", True),
         bot_username=env_str("BOT_USERNAME", ""),
     )

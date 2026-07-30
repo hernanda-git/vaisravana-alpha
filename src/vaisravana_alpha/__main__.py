@@ -69,7 +69,10 @@ def build_engine() -> tuple[AlphaEngine, CommandListener | None]:
 
     conn = init_db(settings.db_path)
     wallet = PaperWallet.from_settings(settings)
-    notifier = TelegramNotifier(settings.telegram_token, settings.telegram_chat_id)
+    notifier = TelegramNotifier(
+        settings.telegram_token, settings.telegram_chat_id,
+        enabled=settings.telegram_enabled,
+    )
 
     # Agentic telemetry lives in its own database. Separate from the trading
     # DB on purpose: the improvement loop reads it continuously while the

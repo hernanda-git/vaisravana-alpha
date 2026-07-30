@@ -103,6 +103,7 @@ class ExitSignal:
     salvage: float  # PnL if exited now, after fees
     reason: str
     weights_used: dict  # which weight set was active
+    pair: str = ""  # pair this signal applies to (filled by runtime)
 
 
 # ── Regime Detector ──────────────────────────────────────────────────────────
@@ -659,6 +660,7 @@ class ExitEngine:
             salvage=salvage,
             reason=self._explain(action, regime, factors),
             weights_used=weights,
+            pair=getattr(tick, "pair", ""),
         )
         self._last_signal = signal
 

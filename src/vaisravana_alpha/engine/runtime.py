@@ -308,6 +308,17 @@ class AlphaEngine:
                 signal.exit_conf, signal.regime.value, signal.salvage,
             )
 
+            # Detailed Telegram card: regime, factor breakdown, salvage, action.
+            if signal.action == ExitAction.CLOSE_50:
+                self._notify(cards.exit_partial_card(
+                    wave, self.wallet, fraction=0.5,
+                    price=tick.price, econ=econ,
+                ))
+            else:
+                self._notify(cards.exit_signal_card(
+                    signal, wave, self.wallet, price=tick.price,
+                ))
+
     def _record_exit_signal(self, pair: str, signal) -> None:
         """Persist exit signals for later learning analysis."""
         if self.agentic is None or not self.run_id:

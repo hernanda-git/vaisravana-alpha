@@ -173,6 +173,77 @@ def status_card(version: str, uptime_s: float, pairs: int, open_n: int,
     ])
 
 
+def exit_signal_card(signal, wave, wallet=None, price: float = 0.0) -> str:
+    """Real-time exit signal card. Shows the regime, factor breakdown,
+    salvage, and the action taken. Even more detailed than the entry card
+    because the exit decision is where edge is won or lost.
+
+    Includes the fee-aware salvage so the owner can see that an exit that
+    looks early was actually the right call once costs are paid.
+    """
+    f = signal.factors
+    w = signal.weights_used
+    action_label = {
+        "CLOSE_100": "FULL CLOSE",
+        "CLOSE_50": "PARTIAL (50%)",
+        "HOLD": "HOLD",
+        "ADD": "ADD",
+        "FLIP": "FLIP BIAS",
+    }.get(signal.action.value, signal.action.value)
+
+    icon = {
+        "CLOSE_100": "🔴",
+        "CLOSE_50": "🟡",
+        "HOLD": "🟢",
+        "ADD": "🟢",
+        "FLIP": "🔄",
+    }.get(signal.action.value, "⚪")
+
+    salvage = signal.salvage
+    salvage_line = (
+        f"<code>  Salvage: {salvage:+.5f}$  "
+        f"({'fee-aware ok' if salvage >= 0 else 'below fee line'})</code>"
+    )
+
+    lines = [
+        f"🎯 <b>REAL-TIME EXIT</b> {icon} <code>{action_label}</code>",
+        f"<code>  Pair   : {html_escape(signal.pair)}</code>",
+        f"<code>  Side   : {html_escape(wave.side)}</code>",
+        f"<code>  Price  : {price:.8f}</code>",
+        f"<code>  Conf   : {signal.exit_conf:.3f}</code>",
+        f"<code>  Regime : {html_escape(signal.regime.value)}</code>",
+        "",
+        f"<code>  Factor scores (weight):</code>",
+        f"<code>    structural : {f.structural:.2f}  (w={w.get('structural', 0):.2f})</code>",
+        f"<code>    momentum   : {f.momentum:.2f}  (w={w.get('momentum', 0):.2f})</code>",
+        f"<code>    orderflow  : {f.orderflow:.2f}  (w={w.get('orderflow', 0):.2f})</code>",
+        f"<code>    volatility : {f.volatility:.2f}  (w={w.get('volatility', 0):.2f})</code>",
+        f"<code>    liquidity  : {f.liquidity:.2f}  (w={w.get('liquidity', 0):.2f})</code>",
+        salvage_line,
+        f"<code>  Reason : {html_escape(signal.reason[:80])}</code>",
+    ]
+    return "\n".join(lines + _balance_footer(wallet))
+
+
+def exit_partial_card(wave, wallet=None, fraction: float = 0.5,
+                       price: float = 0.0, econ: dict | None = None) -> str:
+    """Partial close card (real-time exit engine banked part of the wave)."""
+    econ = econ or {}
+    net = econ.get("net", 0.0)
+    close_fee = econ.get("close_fee", 0.0)
+    icon = "🟡" if net >= 0 else "🔴"
+    lines = [
+        f"🎯 <b>PARTIAL CLOSE</b> {icon} <code>{wave.side} {html_escape(wave.pair)}</code>",
+        f"<code>  Fraction : {fraction * 100:.0f}%</code>",
+        f"<code>  Price    : {price:.8f}</code>",
+        f"<code>  R        : {wave.live_r:+.2f}R (peak {wave.peak_r:+.2f}R)</code>",
+        f"<code>  Fee      : -{close_fee:.5f}$ (close)</code>",
+        f"<code>  {icon} Net (part): {net:+.5f}$</code>",
+        f"<code>  Remaining: {(1 - fraction) * 100:.0f}% trailing</code>",
+    ]
+    return "\n".join(lines + _balance_footer(wallet))
+
+
 def halt_card(reason: str, balance: float) -> str:
     """Shown when the engine stops itself. Always states why."""
     return "\n".join([

@@ -46,9 +46,11 @@ class TelegramNotifier:
     stops hammering the API every tick for the rest of its life.
     """
 
-    def __init__(self, bot_token: str, chat_id: str | int) -> None:
+    def __init__(self, bot_token: str, chat_id: str | int,
+                 enabled: bool = True) -> None:
         self.bot_token = bot_token
         self.chat_id = chat_id
+        self._enabled = enabled
         self._base = f"https://api.telegram.org/bot{bot_token}"
         self._client: httpx.Client | None = None
         self._chat_dead = False
@@ -56,7 +58,7 @@ class TelegramNotifier:
     @property
     def enabled(self) -> bool:
         """False when no token is configured -- the engine then logs instead."""
-        return bool(self.bot_token) and not self._chat_dead
+        return self._enabled and bool(self.bot_token) and not self._chat_dead
 
     def _get_client(self) -> httpx.Client:
         if self._client is None:

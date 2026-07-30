@@ -39,14 +39,14 @@ class FakePosition:
         self.notional = notional
 
 
-def make_tick(price, bid=None, ask=None, volume=1.0, is_buy=True, ts=None):
+def make_tick(price, bid=None, ask=None, qty=1.0, side="BUY", ts=None):
     return TickData(
         ts=ts or time.time(),
         price=price,
         bid=bid or price * 0.999,
         ask=ask or price * 1.001,
-        volume=volume,
-        is_buy=is_buy,
+        qty=qty,
+        side=side,
     )
 
 
@@ -70,7 +70,7 @@ def test_regime_momentum_on_strong_uptrend():
     ctx = FakeContext()
     for i in range(100):
         price = 100.0 + i * 0.5  # steady uptrend
-        tick = make_tick(price, is_buy=True, volume=10.0)
+        tick = make_tick(price, side="BUY", qty=10.0)
         engine.process(tick, ctx, FakePosition())
     # Should detect momentum regime
     assert engine.get_current_regime() in (Regime.MOMENTUM, Regime.CHOP)
@@ -83,7 +83,7 @@ def test_regime_mean_revert_on_high_volatility():
     for i in range(100):
         # Oscillating with increasing amplitude
         price = 100.0 + math.sin(i * 0.5) * (2 + i * 0.1)
-        tick = make_tick(price, volume=15.0)
+        tick = make_tick(price, qty=15.0)
         engine.process(tick, ctx, FakePosition())
     assert engine.get_current_regime() in (Regime.MEAN_REVERT, Regime.CHOP)
 
