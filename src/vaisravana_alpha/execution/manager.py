@@ -19,9 +19,10 @@ log = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 CONFIRM_MS = 0.25            # micro-confirmation (seconds)
-CONF_EXIT_FLOOR = 0.16      # lowered so a wave holds long enough to reach its 1.5R TP instead of being killed on a minor conf dip
-CONF_HOLD_MS = 1.5           # require conf below floor for 1.5s before exit (debounce)
-COOLDOWN_S = 600.0           # wall-clock seconds before same (pair, side) can re-enter.
+CONF_EXIT_FLOOR = 0.10      # allow low-conf positions to survive (entry floor is 0.12);
+                          # only exit on real confidence collapse, not minor dips
+CONF_HOLD_MS = 5.0           # require conf below floor for 5s before exit (debounce)
+COOLDOWN_S = float(os.getenv("VAISRAVANA_COOLDOWN_S", "600.0"))  # wall-clock seconds before same (pair, side) can re-enter.
 # iter-7: cooldown was tick-based (600 ticks) but tick_cooldowns() ran once per
 # tick per PAIR, so with ~20 pairs it decayed ~20x too fast (INJ re-opened 4x in
 # 40s in run11). Wall-clock expiry makes the cooldown deterministic: 10 min.

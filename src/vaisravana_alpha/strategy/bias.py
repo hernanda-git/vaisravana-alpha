@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
-BIAS_THRESH = 0.06       # |score| below this → neutral (lowered hard so the bot surfs weak-leans / flat tape instead of sitting fully flat)
+BIAS_THRESH = 0.03       # |score| below this → neutral (very low so weak leans still trade)
 BIAS_SATURATE = 0.60     # score magnitude that gives strength=1.0
 MIN_BIAS_STRENGTH = 0.40 # minimum strength to act on bias
 FLIP_STRENGTH = 0.35     # bias strength needed to confirm a flip against wave
