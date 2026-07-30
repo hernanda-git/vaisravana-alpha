@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vaisravana-alpha"
+version = "0.1.0"
+description = "Tick-driven crypto futures paper trading engine with fee-aware admission control"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "valarion" }]
+
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=12.0",
+    "pydantic>=2.7",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+vaisravana-alpha = "vaisravana_alpha.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",   # long lines are tolerated in tuning-constant comments
+    "B008",   # dataclass field(default_factory=...) patterns
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]

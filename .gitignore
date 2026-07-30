@@ -1,0 +1,35 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*.so
+
+# Environments
+.venv/
+venv/
+.env
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Runtime state -- never commit a wallet or trade database
+data/
+*.db
+*.db-journal
+*.db-wal
+paper_wallet.json
+surface.json
+*.flag
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store

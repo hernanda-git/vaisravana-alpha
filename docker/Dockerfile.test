@@ -1,0 +1,12 @@
+# Test image: runtime deps plus pytest, source mounted at run time.
+FROM python:3.12-slim
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONPATH=/app/src
+
+COPY pyproject.toml README.md ./
+RUN mkdir -p src/vaisravana_alpha \
+ && touch src/vaisravana_alpha/__init__.py \
+ && pip install ".[dev]"
+
+CMD ["pytest", "-q"]
