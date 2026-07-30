@@ -23,6 +23,11 @@ CONF_EXIT_FLOOR = 0.10      # allow low-conf positions to survive (entry floor i
                           # only exit on real confidence collapse, not minor dips
 CONF_HOLD_MS = 5.0           # require conf below floor for 5s before exit (debounce)
 COOLDOWN_S = float(os.getenv("VAISRAVANA_COOLDOWN_S", "600.0"))  # wall-clock seconds before same (pair, side) can re-enter.
+# Profit-bank arms: close when peak R reaches these levels (scaled to the
+# empiric realized peak band). Lowered for the alpha-exit single-pair mode so
+# small winners close and the bot re-enters quickly (higher trade frequency).
+BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.15"))       # full close at this peak R
+BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.22"))     # partial bank at this peak R
 # iter-7: cooldown was tick-based (600 ticks) but tick_cooldowns() ran once per
 # tick per PAIR, so with ~20 pairs it decayed ~20x too fast (INJ re-opened 4x in
 # 40s in run11). Wall-clock expiry makes the cooldown deterministic: 10 min.
@@ -326,9 +331,9 @@ class WaveManager:
         # Lower the arms into the empiric band so the exit can actually catch the
         # peaks that exist. 0.15R and 0.22R are still far above the ~0.06R fee
         # breakeven, so every bank close stays net-positive.
-        if wave.peak_r >= 0.15:
+        if wave.peak_r >= BANK_R:
             return WaveAction(type="CLOSE", reason="bank_08r", wave=wave, price=tick.price)
-        if wave.peak_r >= 0.22:
+        if wave.peak_r >= BANK_R2:
             # bank a partial at +0.22R near the top of the realized band,
             # so the wave is given room to reach the full 1.5R TP first
             return WaveAction(type="CLOSE", reason="tp05_hit", wave=wave, price=tick.price)
