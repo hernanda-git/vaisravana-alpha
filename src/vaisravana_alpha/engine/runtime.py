@@ -32,6 +32,7 @@ from vaisravana_alpha.execution.wallet import PaperWallet
 from vaisravana_alpha.marketdata.feed import FeedMux
 from vaisravana_alpha.marketdata.rest import RestPoller
 from vaisravana_alpha.notify import cards
+from vaisravana_alpha.storage import agentic
 from vaisravana_alpha.storage import db as storage
 from vaisravana_alpha.strategy.bias import read_bias, read_confidence
 from vaisravana_alpha.strategy.indicators import atr_pct
@@ -90,6 +91,8 @@ class AlphaEngine:
         wallet: PaperWallet,
         guard,
         kill_switch: KillSwitch | None = None,
+        agentic_conn=None,
+        run_id: str = "",
     ) -> None:
         self.settings = settings
         self.surface = surface
@@ -101,6 +104,11 @@ class AlphaEngine:
             daily_loss_limit_pct=surface.risk.daily_loss_limit_pct
         )
 
+        # Agentic telemetry. Optional so tests and ad-hoc runs need no extra
+        # wiring, but always present in deployment.
+        self.agentic = agentic_conn
+        self.run_id = run_id
+
         self.state = EngineState()
         self.context = ContextStore(settings.pairs, settings.context_tfs + ["1h"])
         self.zones = SMCZoneCache()
@@ -110,6 +118,48 @@ class AlphaEngine:
 
         self._feed: FeedMux | None = None
         self._poller: RestPoller | None = None
+        self._last_heartbeat = 0.0
+
+    # -- agentic telemetry -------------------------------------------------
+
+    def _record_rejection(self, gate: str, pair: str, detail: str = "") -> None:
+        """Count a gate rejection.
+
+        Wrapped because telemetry must never be able to stop trading. A
+        locked database is a reason to lose a counter, not a position.
+        """
+        if self.agentic is None or not self.run_id:
+            return
+        try:
+            agentic.record_rejection(self.agentic, self.run_id, gate, pair, detail)
+        except Exception as exc:
+            log.debug("rejection telemetry failed: %s", exc)
+
+    def _record_trade(self, wave, econ: dict) -> None:
+        if self.agentic is None or not self.run_id:
+            return
+        try:
+            econ = dict(econ)
+            econ.setdefault("balance_after", self.wallet.balance)
+            agentic.record_trade(self.agentic, self.run_id, wave, econ)
+        except Exception as exc:
+            log.debug("trade telemetry failed: %s", exc)
+
+    def _heartbeat(self) -> None:
+        """Persist counters periodically so a crashed run still shows progress."""
+        if self.agentic is None or not self.run_id:
+            return
+        now = time.time()
+        if now - self._last_heartbeat < 60.0:
+            return
+        self._last_heartbeat = now
+        try:
+            agentic.heartbeat_run(
+                self.agentic, self.run_id, self.state.ticks,
+                self.state.opens, self.state.closes,
+            )
+        except Exception as exc:
+            log.debug("heartbeat failed: %s", exc)
 
     # -- notification helper ----------------------------------------------
 
@@ -187,16 +237,24 @@ class AlphaEngine:
         self.manager.tick_cooldowns()
         self._refresh_shared_state()
         self._check_wallet()
+        self._heartbeat()
 
     def _entries_allowed(self, pair: str, ctx, confidence: float) -> bool:
-        """Admission control. Every branch can only ever reject."""
+        """Admission control. Every branch can only ever reject.
+
+        Each rejection is counted by gate name. This is what makes a silent
+        bot diagnosable: "no trades" and "4,000 rejections by one gate" look
+        identical in a trade table and demand opposite responses.
+        """
         if self.kill.is_tripped:
+            self._record_rejection("kill_switch", pair, self.kill.trip_reason)
             return False
 
         # Warmup: indicators start at zero, so the first ticks would trade on
         # a signal that is arithmetically meaningless.
         elapsed = time.time() - self.state.started_ts
         if elapsed < self.settings.warmup_s:
+            self._record_rejection("warmup", pair, f"{elapsed:.0f}s elapsed")
             return False
 
         # Fee-aware expected value. `atr_pct` is a module function, not a
@@ -210,6 +268,10 @@ class AlphaEngine:
 
         allowed, reason = survival_gate(pair, ctx, confidence, expected_move_bps)
         if not allowed:
+            # The gate name is the first token of its reason, which keeps the
+            # counter cardinality bounded regardless of the detail text.
+            gate_name = (reason or "survival").split()[0].strip(":")
+            self._record_rejection(gate_name, pair, reason)
             log.debug("gate rejected %s: %s", pair, reason)
         return allowed
 
@@ -256,6 +318,7 @@ class AlphaEngine:
 
             econ = self.manager.close(wave, action.reason, tick.price, self.wallet)
             self.state.closes += 1
+            self._record_trade(wave, econ)
             net = econ.get("net", 0.0)
             if net < 0:
                 self.kill.record_loss(net)

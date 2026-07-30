@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -22,6 +23,7 @@ from vaisravana_alpha.engine.runtime import AlphaEngine
 from vaisravana_alpha.execution.broker import ModeGuard
 from vaisravana_alpha.execution.wallet import PaperWallet
 from vaisravana_alpha.notify.telegram import CommandListener, TelegramNotifier
+from vaisravana_alpha.storage.agentic import finish_run, init_agentic_db, start_run
 from vaisravana_alpha.storage.db import init_db
 
 log = logging.getLogger("vaisravana_alpha")
@@ -69,6 +71,22 @@ def build_engine() -> tuple[AlphaEngine, CommandListener | None]:
     wallet = PaperWallet.from_settings(settings)
     notifier = TelegramNotifier(settings.telegram_token, settings.telegram_chat_id)
 
+    # Agentic telemetry lives in its own database. Separate from the trading
+    # DB on purpose: the improvement loop reads it continuously while the
+    # engine writes, and an analytical query must never contend with the
+    # hot path.
+    agentic_conn = init_agentic_db(settings.agentic_db_path)
+    run_id = start_run(
+        agentic_conn,
+        surface=surface,
+        mode=settings.mode,
+        pairs=settings.pairs,
+        start_balance=wallet.balance,
+        iteration_id=settings.iteration_id,
+        git_sha=_git_sha(),
+    )
+    log.info("run %s recorded in agentic db", run_id)
+
     # Paper mode passes no live adapter, so no live broker can be built.
     guard = ModeGuard(mode=settings.mode)
     guard.broker_for(None if settings.is_paper else _live_adapter())
@@ -80,6 +98,8 @@ def build_engine() -> tuple[AlphaEngine, CommandListener | None]:
         notifier=notifier,
         wallet=wallet,
         guard=guard,
+        agentic_conn=agentic_conn,
+        run_id=run_id,
     )
 
     listener = None
@@ -92,6 +112,18 @@ def build_engine() -> tuple[AlphaEngine, CommandListener | None]:
             bot_username=settings.bot_username or None,
         )
     return engine, listener
+
+
+def _git_sha() -> str:
+    """Best-effort code identity. A surface alone does not identify a run."""
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=5,
+        ).decode().strip()
+    except Exception:
+        return os.getenv("ALPHA_GIT_SHA", "")
 
 
 def _live_adapter():
@@ -116,12 +148,29 @@ async def _run() -> int:
         except NotImplementedError:
             pass    # not supported on every platform; Ctrl-C still works
 
+    status, halt_reason = "completed", ""
     try:
         await engine.run()
+        if engine.state.halt_reason:
+            status, halt_reason = "halted", engine.state.halt_reason
+    except Exception as exc:
+        # Recorded as crashed rather than swallowed: a run that died must not
+        # be scored as if it completed normally.
+        status, halt_reason = "crashed", f"{type(exc).__name__}: {exc}"
+        log.exception("engine crashed")
+        raise
     finally:
         if listener is not None:
             listener.stop()
         engine.notifier.close()
+        try:
+            finish_run(
+                engine.agentic, engine.run_id, status,
+                engine.wallet.balance, engine.state.ticks,
+                engine.state.opens, engine.state.closes, halt_reason,
+            )
+        except Exception as exc:
+            log.warning("could not finalise run record: %s", exc)
     return 0
 
 

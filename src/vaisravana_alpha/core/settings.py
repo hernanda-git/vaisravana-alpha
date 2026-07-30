@@ -96,6 +96,7 @@ class Settings:
     mode: str = "paper"                 # paper | live. live needs human approval.
     data_dir: str = "/data"             # wallet, DB, and stop-flag live here
     log_level: str = "INFO"
+    iteration_id: str = ""              # links a run to the hypothesis it tests
 
     # -- universe ----------------------------------------------------------
     pairs: list[str] = field(default_factory=lambda: list(_DEFAULT_PAIRS))
@@ -136,6 +137,16 @@ class Settings:
     @property
     def db_path(self) -> str:
         return os.path.join(self.data_dir, "vaisravana-alpha.db")
+
+    @property
+    def agentic_db_path(self) -> str:
+        """Separate file from the trading DB.
+
+        The improvement loop runs analytical queries against this
+        continuously while the engine writes. Keeping them apart means a slow
+        aggregate scan can never contend with the tick path.
+        """
+        return os.path.join(self.data_dir, "alpha-agentic.db")
 
     @property
     def wallet_path(self) -> str:

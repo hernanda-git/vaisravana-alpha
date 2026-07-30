@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 vaisravana-alpha = "vaisravana_alpha.__main__:main"
+alpha-eval = "vaisravana_alpha.evaluation.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
