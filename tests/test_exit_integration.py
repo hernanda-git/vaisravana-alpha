@@ -78,8 +78,8 @@ def _fake_wave(pair="1000BONKUSDT", entry=0.00001234, side="long"):
     w.size = 405000.0  # ~$5 notional at 0.00001234
     w.notional = 5.0
     w.leverage = 3
-    w.live_r = 0.5
-    w.peak_r = 0.8
+    w.live_r = 0.05
+    w.peak_r = 0.05
     w.confidence = 0.3
     w.bias = "bullish" if side == "long" else "bearish"
     w.close_reason = ""
@@ -97,6 +97,8 @@ def _fake_context(price=0.00001234):
         pass
     c = Ctx()
     c.price = price
+    c.ema_15m = price
+    c.ema_1h = price
     c.ema9 = price * 1.001
     c.ema21 = price * 1.003
     c.ema55 = price * 1.005
@@ -108,6 +110,15 @@ def _fake_context(price=0.00001234):
     c.sell_volume = 100
     c.cvd = 0
     c.cvd_prev = 0
+    c.flow_delta = 0.0
+    c.flow_volume = 100.0
+    c.bid = price * 0.999
+    c.ask = price * 1.001
+    c.bid_qty = 50.0
+    c.ask_qty = 50.0
+    c.risk_regime = 0.0
+    c.alt_breadth = 0.0
+    c.mtf_confluence = True
     c.atr_percentile = 0.5
     c.vol_1m = 0.01
     c.vol_5m = 0.01
@@ -150,19 +161,19 @@ def test_partial_close_on_moderate_signal():
     wave = _fake_wave(entry=0.00001234, side="long")
     manager.waves[wave.wave_id] = wave
 
-    # Price drops 2.5%, RSI collapses, CVD negative
-    ctx = _fake_context(price=0.00001200)
-    ctx.ema9 = 0.00001200 * 1.001
-    ctx.ema21 = 0.00001200 * 1.003
-    ctx.ema55 = 0.00001200 * 1.005
+    # Price drops ~2% (above SL at -2%), RSI collapses, CVD negative
+    ctx = _fake_context(price=0.00001210)
+    ctx.ema9 = 0.00001210 * 1.001
+    ctx.ema21 = 0.00001210 * 1.003
+    ctx.ema55 = 0.00001210 * 1.005
     ctx.rsi3 = 25.0  # oversold = exit signal for long
     ctx.cvd = -500
     ctx.atr_percentile = 0.9
 
-    tick = _make_tick(price=0.00001200, is_buy=False)
+    tick = _make_tick(price=0.00001210, is_buy=False)
     # Run enough ticks to build regime context
     for i in range(20):
-        p = 0.00001200 + i * 0.1
+        p = 0.00001210 + i * 0.00000015
         ctx2 = _fake_context(price=p)
         ctx2.rsi3 = 25.0
         ctx2.cvd = -500 - i * 10
@@ -182,16 +193,16 @@ def test_exit_signal_telemetry_recorded():
     wave = _fake_wave(entry=0.00001234, side="long")
     manager.waves[wave.wave_id] = wave
 
-    ctx = _fake_context(price=0.00001170)
-    ctx.ema9 = 95.5
-    ctx.ema21 = 96.0
-    ctx.ema55 = 96.5
+    ctx = _fake_context(price=0.00001215)
+    ctx.ema9 = 0.00001215 * 1.001
+    ctx.ema21 = 0.00001215 * 1.003
+    ctx.ema55 = 0.00001215 * 1.005
     ctx.rsi3 = 15.0
     ctx.cvd = -1000
     ctx.atr_percentile = 0.95
 
     for i in range(15):
-        p = 0.00001170 + i * 0.2
+        p = 0.00001215 + i * 0.00000010
         c = _fake_context(price=p)
         c.rsi3 = 15.0
         c.cvd = -1000 - i * 20

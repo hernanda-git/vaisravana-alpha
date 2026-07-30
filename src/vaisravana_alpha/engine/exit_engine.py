@@ -63,8 +63,9 @@ class TickData:
     price: float
     bid: float
     ask: float
-    volume: float
-    is_buy: bool  # True if buyer-initiated (market buy)
+    qty: float
+    side: str = ""  # "BUY" | "SELL" | "" for mark/book ticks
+    is_buy: bool = False  # legacy alias for backward-compat with tests
 
 
 @dataclass
@@ -131,16 +132,16 @@ class RegimeDetector:
         self._prices.append(tick.price)
         if len(self._prices) > 200:
             self._prices.pop(0)
-
-        self._vols.append(tick.volume)
+        # Volume regime
+        self._vols.append(tick.qty if tick.qty else tick.volume if hasattr(tick, 'volume') else 0.0)
         if len(self._vols) > 200:
             self._vols.pop(0)
 
         # CVD: cumulative volume delta
-        if tick.is_buy:
-            self._cvd += tick.volume
-        else:
-            self._cvd -= tick.volume
+        if tick.side == "BUY":
+            self._cvd += tick.qty
+        elif tick.side == "SELL":
+            self._cvd -= tick.qty
         self._cvd_history.append(self._cvd)
         if len(self._cvd_history) > 50:
             self._cvd_history.pop(0)
@@ -344,7 +345,7 @@ class FactorPipeline:
         """Accumulate volume by price level."""
         price_key = round(tick.price, 8)
         self._volume_profile[price_key] = (
-            self._volume_profile.get(price_key, 0) + tick.volume
+            self._volume_profile.get(price_key, 0) + tick.qty
         )
         if len(self._volume_profile) > 50:
             # Remove oldest price level
