@@ -18,36 +18,25 @@ log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-CONFIRM_MS = 0.25            # micro-confirmation (seconds)
+CONFIRM_MS = 0.15            # micro-confirmation (seconds)
 CONF_EXIT_FLOOR = 0.10      # allow low-conf positions to survive (entry floor is 0.12);
                           # only exit on real confidence collapse, not minor dips
-CONF_HOLD_MS = 5.0           # require conf below floor for 5s before exit (debounce)
-COOLDOWN_S = float(os.getenv("VAISRAVANA_COOLDOWN_S", "600.0"))  # wall-clock seconds before same (pair, side) can re-enter.
+CONF_HOLD_MS = 0.3           # require conf below floor for 0.3s before exit (debounce)
+COOLDOWN_S = float(os.getenv("VAISRAVANA_COOLDOWN_S", "120.0"))  # wall-clock seconds before same (pair, side) can re-enter.
 # Profit-bank arms: close when peak R reaches these levels (scaled to the
 # empiric realized peak band). Lowered for the alpha-exit single-pair mode so
 # small winners close and the bot re-enters quickly (higher trade frequency).
-BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.15"))       # full close at this peak R
-BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.22"))     # partial bank at this peak R
+BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.50"))       # full close at this peak R
+BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.30"))     # partial bank at this peak R
 # iter-7: cooldown was tick-based (600 ticks) but tick_cooldowns() ran once per
 # tick per PAIR, so with ~20 pairs it decayed ~20x too fast (INJ re-opened 4x in
 # 40s in run11). Wall-clock expiry makes the cooldown deterministic: 10 min.
 MAX_OPEN_WAVES = int(os.getenv("VAISRAVANA_MAX_OPEN_WAVES", "8"))  # hard cap on concurrent waves (fee-bleed guard)
-BREAKEVEN_FLOOR_R = 0.3      # once peak_r >= this, SL moves to breakeven (tight enough to actually lock 0)
-LOSS_CUT_R = 0.35            # iter-8: hard loss-cut (was 0.5). Two run12 losers bled to
-                              # -0.57/-0.60R and sat at max_age (reversal 0b never armed
-                              # because peak never reached 0.2R). Cutting early caps
-                              # per-wave tail risk instead of riding to the full 1.0R SL.
-                              # Pure loss protection: only fires when live_r <= -LOSS_CUT_R,
-                              # so it can NEVER touch a winner and cannot raise frequency.
-                              # iter-16: tightened 0.5 -> 0.35 on telemetry counterfactual
-                              # over runs24-28 (44 closes): only 1 wave ever traded below
-                              # -0.3R and it did NOT recover (run25 loss_cut -0.506R);
-                              # cutting at -0.35 would have saved +0.12R with 0 winners
-                              # clipped. Caps worst-case tail ~30% tighter at ~zero
-                              # in-sample cost (capital-preservation directive).
-FLIP_STRENGTH = 0.30         # bias strength needed to confirm a flip
-PARTIAL_FRAC = 0.35          # fraction to trim on stall
-MAX_WAVE_AGE_S = int(os.getenv("VAISRAVANA_MAX_WAVE_AGE_S", "900"))  # force-close a wave after 15m if nothing else exits it (anti-stuck; prod floor)
+BREAKEVEN_FLOOR_R = 0.20     # once peak_r >= this, SL moves to breakeven (tight enough to actually lock 0)
+LOSS_CUT_R = 0.50            # hard loss-cut — give trades room, wider stop
+FLIP_STRENGTH = 0.20         # bias strength needed to confirm a flip
+PARTIAL_FRAC = 0.25          # fraction to trim on stall
+MAX_WAVE_AGE_S = int(os.getenv("VAISRAVANA_MAX_WAVE_AGE_S", "300"))  # force-close a wave after 5m if nothing else exits it (anti-stuck; prod floor)
 
 
 # ── Actions ───────────────────────────────────────────────────────────────────

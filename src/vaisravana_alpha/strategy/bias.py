@@ -15,13 +15,13 @@ log = logging.getLogger(__name__)
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
 BIAS_THRESH = 0.03       # |score| below this → neutral (very low so weak leans still trade)
-BIAS_SATURATE = 0.60     # score magnitude that gives strength=1.0
-MIN_BIAS_STRENGTH = 0.40 # minimum strength to act on bias
-FLIP_STRENGTH = 0.35     # bias strength needed to confirm a flip against wave
+BIAS_SATURATE = 0.25     # score magnitude that gives strength=1.0
+MIN_BIAS_STRENGTH = 0.25 # minimum strength to act on bias
+FLIP_STRENGTH = 0.20     # bias strength needed to confirm a flip against wave
 
-CONF_ENTRY_FLOOR = 0.18  # lowered: bias+struct alone must clear the floor (REST-poll mode has 0 vol_confirm/recency)
-CONF_EXIT_FLOOR = 0.25   # confidence below this → early exit
-CONF_HOLD_MS = 0.5       # how long conf must stay below floor before exit (ms)
+CONF_ENTRY_FLOOR = 0.12  # lowered: bias+struct alone must clear the floor (REST-poll mode has 0 vol_confirm/recency)
+CONF_EXIT_FLOOR = 0.15   # confidence below this → early exit
+CONF_HOLD_MS = 0.3       # how long conf must stay below floor before exit (ms)
 
 SIZE_MIN = 0.30          # minimum entry size multiplier
 SIZE_MAX = 1.00          # maximum entry size multiplier
@@ -102,7 +102,7 @@ def _book_pressure(bid: float, ask: float, bid_qty: float = 0.0, ask_qty: float 
     return _clamp((imba - 0.5) * 2, -1.0, 1.0)
 
 
-def _recency_factor(signal_age_s: float, half_life_s: float = 300.0) -> float:
+def _recency_factor(signal_age_s: float, half_life_s: float = 150.0) -> float:
     """Exponential decay: 1.0 fresh → 0.0 stale."""
     if signal_age_s <= 0:
         return 1.0
