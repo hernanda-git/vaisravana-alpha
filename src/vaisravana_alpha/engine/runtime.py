@@ -36,10 +36,11 @@ from vaisravana_alpha.marketdata.rest import RestPoller
 from vaisravana_alpha.notify import cards
 from vaisravana_alpha.storage import agentic
 from vaisravana_alpha.storage import db as storage
-from vaisravana_alpha.strategy.bias import read_bias, read_confidence
+from vaisravana_alpha.strategy.bias import read_bias, read_confidence, set_universe_ranker
 from vaisravana_alpha.strategy.indicators import atr_pct
 from vaisravana_alpha.strategy.scanner import scan
 from vaisravana_alpha.strategy.smc import SMCZoneCache
+from vaisravana_alpha.strategy.universe_ranker import UniverseRanker
 from vaisravana_alpha.strategy.survival import (
     current_cap,
     record_open,
@@ -129,6 +130,18 @@ class AlphaEngine:
             from vaisravana_alpha.engine.exit_engine import ExitEngine
             self.exit_engine = ExitEngine()
             self._exit_last_eval: dict[str, float] = {}
+
+        # Universe ranker — background task that fetches + scores all Binance futures pairs.
+        # Injected into bias.py so read_bias() adds universe score as a bias component.
+        self._universe_ranker = UniverseRanker(
+            rest_base=settings.rest_base,
+            pairs_file=os.path.join(settings.data_dir, "universe_pairs.json"),
+            scores_file=os.path.join(settings.data_dir, "universe_scores.json"),
+            top_n=5,
+            bottom_n=5,
+        )
+        set_universe_ranker(self._universe_ranker)
+        self._universe_task: asyncio.Task | None = None
 
     # -- agentic telemetry -------------------------------------------------
 
@@ -490,6 +503,27 @@ class AlphaEngine:
         self.state.open_waves = list(self.manager.waves.values())
         self.state.closed_waves = list(getattr(self.manager, "closed_today", []))
 
+    def _clear_stale_open_waves(self) -> None:
+        """Clear open waves from DB that won't survive a container restart.
+
+        The WaveManager's in-memory state is lost on restart, so any waves
+        marked SURFING in the DB are orphans. We mark them as closed
+        with a 'stale_on_restart' reason so stats stay clean and the DB
+        doesn't accumulate phantom open positions.
+        """
+        try:
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE wave_log SET state='WAVE_BREAK', close_reason='stale_on_restart' "
+                "WHERE state='SURFING'"
+            )
+            count = cur.rowcount
+            if count:
+                log.warning("cleared %d stale SURFING waves from DB", count)
+            self.conn.commit()
+        except Exception as exc:
+            log.warning("failed to clear stale waves: %s", exc)
+
     def _check_wallet(self) -> None:
         """Halt when the paper account is spent.
 
@@ -542,6 +576,17 @@ class AlphaEngine:
         """
         storage.init_wave_db(self.conn)
 
+        # Clear any stale SURFING waves from DB — open waves don't survive
+        # container restarts because the manager's in-memory state is lost.
+        # These stale entries would otherwise accumulate and inflate stats.
+        self._clear_stale_open_waves()
+
+        # Auto-clear stale stop flags on boot. The clear_stop() method
+        # checks if the flag is >60s old and clears it automatically.
+        # This prevents stale flags from blocking trading after crashes
+        # or container restarts.
+        self.clear_stop()
+
         if self.stop_flag_present:
             log.warning(
                 "stop flag present at %s -- refusing to trade. Send /resume "
@@ -585,8 +630,26 @@ class AlphaEngine:
             except Exception as exc:
                 log.warning("websocket feed stopped: %s", exc)
 
+        # Universe ranker — background task, updates every 60s
+        async def _run_universe() -> None:
+            while True:
+                try:
+                    await self._universe_ranker.update()
+                    # Log top 3 strongest/weakest for debugging
+                    strongest = self._universe_ranker.strongest(3)
+                    weakest = self._universe_ranker.weakest(3)
+                    log.info(
+                        "universe: strongest=%s weakest=%s",
+                        [(s.pair, round(s.total_score, 3)) for s in strongest],
+                        [(s.pair, round(s.total_score, 3)) for s in weakest],
+                    )
+                except Exception as exc:
+                    log.warning("universe ranker update failed: %s", exc)
+                await asyncio.sleep(60)
+
         ws_task = asyncio.create_task(_run_ws(), name="ws-feed")
         rest_task = asyncio.create_task(self._poller.run(), name="rest-feed")
+        self._universe_task = asyncio.create_task(_run_universe(), name="universe-ranker")
 
         log.info(
             "engine running: %d pairs, warmup %.0fs, balance %.4f$",
@@ -594,11 +657,11 @@ class AlphaEngine:
         )
 
         try:
-            await asyncio.gather(ws_task, rest_task)
+            await asyncio.gather(ws_task, rest_task, self._universe_task)
         except asyncio.CancelledError:
             log.info("engine halting: %s", self.state.halt_reason or "cancelled")
         finally:
-            for task in (ws_task, rest_task):
+            for task in (ws_task, rest_task, self._universe_task):
                 if not task.done():
                     task.cancel()
             if self._poller:

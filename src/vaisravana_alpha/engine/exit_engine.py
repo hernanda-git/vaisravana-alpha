@@ -552,17 +552,23 @@ class ExitConfidenceModel:
     ) -> ExitAction:
         """Decide action based on confidence and fee-aware salvage.
 
-        Key principle: if salvage is negative (exiting loses money),
-        require higher confidence to exit. If salvage is positive,
-        can exit at lower confidence.
+        Key principle: aggressive loss cutting. If salvage is negative,
+        LOWER thresholds to exit faster — don't let losses compound.
+        If salvage is positive, can be more selective.
         """
         thresholds = self.REGIME_THRESHOLDS[regime]
 
-        # Adjust thresholds based on salvage
+        # Adjust thresholds based on salvage — aggressive loss cutting
         if salvage < 0:
-            # Exiting loses money: require higher confidence
+            # Exiting loses money: LOWER thresholds to exit FASTER
+            # This prevents the death spiral of holding losing trades
             thresholds = {
-                k: min(0.95, v + 0.1) for k, v in thresholds.items()
+                k: max(0.3, v - 0.15) for k, v in thresholds.items()
+            }
+        elif salvage > 0:
+            # Exiting gains money: can be more selective
+            thresholds = {
+                k: min(0.95, v + 0.05) for k, v in thresholds.items()
             }
 
         if confidence >= thresholds["close_100"]:

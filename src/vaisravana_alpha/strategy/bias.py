@@ -1,16 +1,74 @@
-"""BiasEngine — per-tick conviction from MTF EMA + flow + book + risk + breadth.
+"""BiasEngine — per-tick conviction from MTF EMA + flow + book + risk + breadth + universe ranking.
 
 The master switch: jump-IN when bias aligns + confidence ≥ floor;
 jump-OUT when bias flips against the wave.
+
+Universe ranking integration:
+  The engine runs UniverseRanker as a background task every 60s.
+  read_bias() reads the cached universe score for the pair and adds it
+  as a bias component. This means:
+    - Strongest pairs get a BUY boost
+    - Weakest pairs get a SELL boost
+    - The bot trades the extremes, not a static 15-pair list
 """
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from vaisravana_alpha.core.models import BiasReading, TickContext
+from vaisravana_alpha.strategy.universe_ranker import UniverseRanker
 
 log = logging.getLogger(__name__)
+
+# ── Universe ranker singleton (cached, updated by engine) ─────────────────────
+
+_universe_ranker: UniverseRanker | None = None
+_universe_score_cache: dict[str, float] = {}  # pair → total_score (-1..+1)
+_universe_last_update: float = 0.0
+_UNIVERSE_STALE_S = 120  # treat as stale if >120s old
+
+
+def set_universe_ranker(ranker: UniverseRanker) -> None:
+    """Called by the engine at boot to inject the ranker."""
+    global _universe_ranker
+    _universe_ranker = ranker
+
+
+def _get_universe_score(pair: str) -> float:
+    """Return cached universe score for a pair (-1.0 weakest to +1.0 strongest).
+
+    Returns 0.0 (neutral) if:
+      - Ranker not initialized
+      - Pair not in current ranking
+      - Cache is stale (>120s)
+    """
+    global _universe_last_update
+
+    if _universe_ranker is None:
+        return 0.0
+
+    # Refresh cache if stale
+    now = time.time()
+    if now - _universe_last_update > _UNIVERSE_STALE_S:
+        _refresh_cache()
+        _universe_last_update = now
+
+    return _universe_score_cache.get(pair, 0.0)
+
+
+def _refresh_cache() -> None:
+    """Populate _universe_score_cache from the ranker's latest ranking."""
+    global _universe_score_cache, _universe_last_update
+    if _universe_ranker is None:
+        return
+
+    _universe_score_cache = {}
+    for score_obj in _universe_ranker.ranked:
+        _universe_score_cache[score_obj.pair] = score_obj.total_score
+
+    _universe_last_update = time.time()
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
@@ -29,11 +87,12 @@ SIZE_MAX = 1.00          # maximum entry size multiplier
 # ── Component weights (design doc §3.2) ──────────────────────────────────────
 
 BIAS_WEIGHTS = {
-    "mtf_ema": 0.40,
-    "flow_delta": 0.25,
-    "book_pressure": 0.20,
-    "risk_regime": 0.10,
+    "mtf_ema": 0.30,
+    "flow_delta": 0.15,
+    "book_pressure": 0.10,
+    "risk_regime": 0.05,
     "breadth": 0.05,
+    "universe": 0.35,  # NEW: global strength/weakness ranking
 }
 
 CONF_WEIGHTS = {
@@ -142,6 +201,12 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
     # 5. Breadth
     breadth = _clamp(ctx.alt_breadth, -1.0, 1.0)
 
+    # 6. Universe ranking — global strength/weakness across ALL Binance futures
+    #    Strongest pairs get BUY boost, weakest get SELL boost.
+    #    This is the KEY fix: instead of guessing direction on a static 15-pair list,
+    #    we trade the extremes of the ranked universe.
+    universe_score = _get_universe_score(pair)
+
     # Weighted blend
     score = (
         BIAS_WEIGHTS["mtf_ema"] * mtf_ema
@@ -149,6 +214,7 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
         + BIAS_WEIGHTS["book_pressure"] * book_pressure
         + BIAS_WEIGHTS["risk_regime"] * risk_regime
         + BIAS_WEIGHTS["breadth"] * breadth
+        + BIAS_WEIGHTS["universe"] * universe_score
     )
 
     # Direction. When the blended score is near zero (choppy/flat tape), fall
@@ -179,6 +245,7 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
             "book_pressure": round(book_pressure, 4),
             "risk_regime": round(risk_regime, 4),
             "breadth": round(breadth, 4),
+            "universe": round(universe_score, 4),
             "score": round(score, 4),
         },
         ts=tick.ts if hasattr(tick, "ts") else 0.0,
