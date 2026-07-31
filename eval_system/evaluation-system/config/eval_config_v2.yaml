@@ -1,0 +1,141 @@
+meta_evaluation:
+  enabled: true
+  check_interval: every_window
+  max_iterations: 5
+  confidence_threshold: 0.75
+
+  trust_levels:
+    high: 0.75
+    medium: 0.50
+    low: 0.25
+    unknown: 0.0
+
+  actions:
+    high: use_as_primary
+    medium: use_with_caution
+    low: investigate
+    unknown: send_to_llm_research
+
+dynamic_factors:
+  update_interval: every_window
+  learning_rate: 0.1
+  min_weight: 0.05
+  max_weight: 0.50
+
+  regime_factors:
+    trend_strength:
+      weight: 0.25
+      adaptive: true
+    vol_regime:
+      weight: 0.20
+      adaptive: true
+    liquidity_regime:
+      weight: 0.15
+      adaptive: true
+    direction_regime:
+      weight: 0.15
+      adaptive: true
+
+  flow_factors:
+    cvd_direction:
+      weight: 0.20
+      adaptive: true
+    cvd_momentum:
+      weight: 0.15
+      adaptive: true
+    book_imbalance:
+      weight: 0.15
+      adaptive: true
+    flow_toxicity:
+      weight: 0.20
+      adaptive: true
+
+  cross_asset_factors:
+    btc_trend:
+      weight: 0.25
+      adaptive: true
+    btc_vol:
+      weight: 0.15
+      adaptive: true
+    btc_correlation:
+      weight: 0.20
+      adaptive: true
+    btc_lead:
+      weight: 0.20
+      adaptive: true
+
+  temporal_factors:
+    session_regime:
+      weight: 0.20
+      adaptive: true
+    hour_of_day:
+      weight: 0.15
+      adaptive: true
+    day_of_week:
+      weight: 0.10
+      adaptive: true
+    consecutive_losses:
+      weight: 0.15
+      adaptive: true
+
+  llm_discovered_factors:
+    roll_measure:
+      weight: 0.25
+      adaptive: true
+    vpin_level:
+      weight: 0.25
+      adaptive: true
+    herding_intensity:
+      weight: 0.20
+      adaptive: true
+    adverse_selection_risk:
+      weight: 0.15
+      adaptive: true
+    feedback_loop_strength:
+      weight: 0.15
+      adaptive: true
+
+llm_research:
+  enabled: true
+  model: inclusionai/ling-3.0-flash:free
+  provider: gitlawb-opengateway
+
+  research_queue:
+    - topic: Roll Measure predictability in crypto futures
+      priority: high
+      status: pending
+    - topic: VPIN toxicity levels across Binance pairs
+      priority: high
+      status: pending
+    - topic: Bot herding patterns and feedback loops
+      priority: medium
+      status: pending
+    - topic: Adverse selection in 1m scalping
+      priority: medium
+      status: pending
+    - topic: Cross-asset correlation dynamics
+      priority: medium
+      status: pending
+
+  brainstorm_interval: weekly
+  challenge_assumptions_interval: bi-weekly
+
+  research_output_action:
+    actionable: add_to_factor_engine
+    partially_actionable: add_with_caution
+    not_actionable: document_and_revisit
+
+decision_gate:
+  persist_min_aggregate: 0.60
+  persist_min_baseline: 0.40
+  iterate_min_aggregate: 0.40
+  rollback_max_aggregate: 0.40
+  pause_drawdown: 0.20
+  stop_drawdown: 0.50
+
+  meta_decision_weights:
+    layer1_trust: 0.15
+    layer2_trust: 0.25
+    layer3_trust: 0.20
+    layer4_trust: 0.25
+    layer5_trust: 0.15
