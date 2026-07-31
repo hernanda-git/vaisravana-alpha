@@ -48,6 +48,19 @@
 - No cross-asset correlation (BTC leader)
 - No volume profile / VPVR
 - No microstructure signals beyond bookTicker
+- No Roll Measure / VPIN / toxicity detection
+- Result: the bot is blind to market regime, liquidity conditions, and institutional flow
+
+**Problem 4b: No market microstructure intelligence** (NEW from research)
+- No Roll Measure (autocorrelation-based price predictability)
+- No VPIN (Volume-Synchronized Probability of Informed Trading)
+- No order flow toxicity detection
+- No adverse selection risk scoring
+- No maker/taker flow imbalance tracking beyond bookTicker
+- Research shows: Roll Measure + VPIN are the #1 predictors of crypto price dynamics (AUC 0.54-0.61, Easley et al 2024)
+- Crypto markets have higher VPIN than traditional markets = more toxicity = more adverse selection risk for retail bots
+- If millions of bots trade the same strategy, they create feedback loops (herding) that amplify price moves
+- The bot needs to detect when it's trading into toxic flow and avoid it
 
 **Problem 5: No partial TP / scale-out** (confirmed across all 3 bots)
 - Wave: fixed TP at 1.5R, no partial close
@@ -97,6 +110,10 @@
 | **Market regime detection** | Trending vs mean-reverting vs choppy; each needs different strategy | High — wrong strategy in wrong regime = losses |
 | **Time-of-day session analysis** | Asian/European/American sessions have different volatility and direction | Medium — avoid low-liquidity traps |
 | **Adverse selection detection** | When large orders sweep the book, price moves against retail | Medium — avoid entering into sweeps |
+| **Roll Measure** | Autocorrelation-based price predictability; high Roll = momentum is real | High — avoid trading against momentum |
+| **VPIN** | Volume-synchronized probability of informed trading; detects toxic flow | High — avoid entering when toxicity is high |
+| **Order flow toxicity** | Detect when incoming flow is informed vs. noise | High — don't trade against informed flow |
+| **Feedback loop detection** | Detect when many bots are trading the same strategy (herding) | Medium-High — herding amplifies moves against retail |
 
 ### 2.2 Missing Exit Intelligence
 
@@ -117,6 +134,9 @@
 | **Liquidity sweep detection** | Price sweeping previous lows/highs before reversing | Medium — better entries at sweep reversals |
 | **CVD as entry amplifier** | CVD divergence already exists but only as exit veto; should amplify entries too | Medium-High — CVD confirms direction |
 | **Regime-adaptive entry** | Different entry thresholds for trending vs choppy vs mean-reverting | High — avoid entries in wrong regime |
+| **Roll Measure filter** | Only enter when autocorrelation confirms momentum is real | High — avoid trading against mean-reverting price |
+| **VPIN filter** | Only enter when order flow toxicity is low | High — avoid entering when informed flow is present |
+| **Herding detection** | Detect when many bots are trading the same strategy | Medium-High — herding amplifies moves against retail |
 
 ---
 
@@ -263,6 +283,9 @@ The wave bot is the best candidate for aggressive scalping v2 because:
 11. Add BTC correlation filter
 12. Add funding rate filter
 13. Add dynamic position sizing
+14. Add Roll Measure filter (momentum confirmation)
+15. Add VPIN filter (toxicity avoidance)
+16. Add herding detection (avoid crowded trades)
 
 ### 4.2 Phase 2: Main Bot — Week 2
 
@@ -287,6 +310,13 @@ The wave bot is the best candidate for aggressive scalping v2 because:
 7. Fix universe ranker (all 677 pairs, not just 50)
 8. Add regime detection
 9. Add BTC correlation filter
+10. Add Roll Measure filter (momentum confirmation)
+11. Add VPIN filter (toxicity avoidance)
+12. Add herding detection (avoid crowded trades)
+13. Wire existing survival_gate() into runtime (was pass-through)
+14. Fix universe ranker (all 677 pairs, not just 50)
+15. Fix exit_engine type mismatch
+16. Update fee constants to current model (6bps RT)
 
 ### 4.4 Phase 4: Data Collection Project — Week 4
 
@@ -329,6 +359,26 @@ At 20 trades/hour:
 6. **Dynamic sizing** — bigger positions on high-confidence setups
 7. **Fee-aware** — every trade is +EV after fees
 8. **Regime detection** — avoids trading in the wrong regime
+9. **Roll Measure filter** — only enter when autocorrelation confirms momentum is real (avoid mean-reverting traps)
+10. **VPIN filter** — only enter when order flow toxicity is low (avoid trading against informed flow)
+11. **Herding detection** — detect when many bots are trading the same strategy and reduce size or skip
+
+### 5.4 Market Microstructure Edge (from research)
+
+Recent academic research (Easley et al 2024, SSRN 4814346) shows that crypto markets have measurable microstructure predictability:
+
+- **Roll Measure** (autocorrelation): AUC 0.54-0.61 for predicting price dynamics. High Roll = momentum is real.
+- **VPIN** (toxicity): AUC 0.53-0.58. High VPIN = informed flow present, adverse selection risk high.
+- Crypto markets have higher VPIN than traditional markets = more toxicity = more adverse selection risk for retail bots
+- Cross-asset effects: BTC Roll + BTC VPIN predict ETH and other altcoin dynamics
+- These effects are stable across bull/bear regimes (crypto winter had no effect on predictability)
+
+**Practical implication for the bot:**
+- When Roll Measure is high + VPIN is low → enter (momentum is real, flow is clean)
+- When Roll Measure is low + VPIN is high → skip or reduce size (price is mean-reverting, flow is toxic)
+- When many bots are trading the same strategy → reduce size (herding amplifies moves against retail)
+
+This gives the bot a structural edge: it trades WITH informed flow and AGAINST toxic flow, while other bots (including millions of similar bots) trade blindly.
 
 ---
 
