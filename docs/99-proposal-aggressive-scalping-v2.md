@@ -179,6 +179,15 @@ tick → regime_detect → bias → scan → open (no gates) → manage (trail +
 - Order book depth check: avoid entering when bid/ask imbalance is extreme
 - Time-of-day session awareness: prefer high-liquidity sessions
 - Volatility-adjusted SL: SL = 0.15R * vol_multiplier (wider in high-vol)
+- Roll Measure filter: only enter when autocorrelation confirms momentum is real
+- VPIN filter: only enter when order flow toxicity is low
+- Herding detection: detect when many bots are trading the same strategy
+- Incremental feature computation (no recomputation from scratch every tick)
+- Async WebSocket processing with zero-copy tick parsing
+- Latency monitoring per tick (decision + serialization + network)
+- Connection pool with TCP_NODELAY for persistent Binance WS
+- Numba JIT for hot-path numeric computations (EMA, ATR, structure scoring)
+- Pre-allocated circular buffers for price history (no GC pressure)
 
 ### 3.3 Entry Logic (simplified for speed)
 
@@ -444,19 +453,95 @@ Fees     : -0.19$ (97 trades)
 | Aggressive sizing blows up | Medium | High | Max 5% risk per trade, max 10 concurrent positions, 20% drawdown pause |
 | Regime detection wrong | Medium | Medium | Conservative defaults; regime only adjusts parameters, never blocks |
 | BTC correlation filter misses moves | Medium | Low | Filter is soft (reduces size, not blocks); can be disabled |
-| Adaptive TP too wide in choppy | Medium | Medium | Max TP multiplier 2x; time-based TP catches flat moves |
-| Partial TP at +0.5R misses big moves | Low | Low | Rest rides to full TP; partial only locks in 50% |
+| **Adaptive TP too wide in choppy** | Medium | Medium | Max TP multiplier 2x; time-based TP catches flat moves |
+| **Partial TP at +0.5R misses big moves** | Low | Low | Rest rides to full TP; partial only locks in 50% |
+| **Latency too high** | Medium | High | Incremental features, async WS, Numba JIT, pre-allocated buffers |
+| **Order book snapshot stale** | Medium | Medium | Use bookTicker WS (real-time), not REST polling for depth |
+
+---\n\n## 7. PERFORMANCE OPTIMIZATION — MAKING THE BOT FASTER NOT SLOWER
+
+### 7.1 Latency Budget (per tick)
+
+```
+Target: <5ms per tick (Binance WS tick)
+Budget breakdown:
+  - Tick parsing:        <0.1ms  (zero-copy JSON parse)
+  - Feature update:      <0.5ms  (incremental, no recomputation)
+  - Signal generation:   <1.0ms  (EMA, ATR, structure, CVD)
+  - Gate check:          <0.1ms  (simple comparisons)
+  - Exit evaluation:     <0.5ms  (6 checks in priority order)
+  - Notification:        <1.0ms  (async, non-blocking)
+  - DB write:            <1.0ms  (async, batched)
+  - Total:               <4.2ms  (well within 5ms budget)
+```
+
+### 7.2 Optimization Techniques
+
+**1. Incremental Feature Computation**
+- EMA: tick-recursive formula, O(1) per tick (already implemented)
+- ATR: rolling window, update incrementally (already implemented)
+- Structure score: incremental EMA slope update
+- CVD: running sum of buy_volume - sell_volume, O(1) per tick
+- Roll Measure: incremental autocorrelation update (new)
+- VPIN: running volume imbalance with exponential decay (new)
+
+**2. Zero-Copy Tick Parsing**
+- Use `orjson` instead of `json.loads` for WS messages (3-5x faster)
+- Pre-allocate Tick dataclass fields (avoid GC pressure)
+- Use `__slots__` on all dataclasses (reduces memory, faster attribute access)
+
+**3. Async WebSocket with TCP_NODELAY**
+- Persistent WS connection to Binance (no reconnect overhead)
+- TCP_NODELAY on socket (disable Nagle's algorithm)
+- Ping/pong keepalive every 20s (detect dead connections fast)
+- Connection pool for REST API calls (reuse HTTPS connections)
+
+**4. Numba JIT for Hot-Path Numeric Computations**
+- EMA update: `@njit` decorator
+- ATR computation: `@njit` decorator
+- Structure scoring: `@njit` decorator
+- Expected: 10-50x speedup on numeric loops
+
+**5. Pre-Allocated Circular Buffers**
+- Price history: fixed-size deque (no dynamic allocation)
+- Kline buffer: pre-allocated list with index pointer
+- Feature history: circular buffer with overwrite
+- Avoids GC pauses during hot loop
+
+**6. Batched DB Writes**
+- Collect telemetry in memory, flush every 5s (not per tick)
+- Use `executemany()` for batch inserts
+- WAL mode for SQLite (faster writes)
+
+**7. Async Notification**
+- Telegram sends are async (non-blocking)
+- Queue notifications, send in background
+- Never block the hot loop for notification
+
+### 7.3 What NOT to Add (Things That Make Bot Slower or Worse)
+
+| Feature | Why NOT to Add | Impact |
+|---------|---------------|--------|
+| Deep order book scanning (all levels) | Too slow, Binance WS only sends top-of-book | SLOW |
+| ML model inference per tick | Python ML inference is 10-100ms, too slow | SLOW |
+| Backtest replay per tick | Blocks the hot loop | SLOW |
+| Complex ML features (word2vec, embeddings) | Overkill for 1m scalping, slow to compute | SLOW |
+| News sentiment analysis | Requires external API call, adds latency | SLOW |
+| Multi-exchange arbitrage | Adds complexity, not needed for single-exchange scalping | COMPLEX |
+| Full L2 order book reconstruction | Too much data, too slow to process | SLOW |
+| Cross-exchange price comparison | Not needed for Binance-only scalping | UNNECESSARY |
 
 ---
 
 ## 8. NEXT STEPS
 
-1. **Implement Phase 1 in wave bot** (remove gates, add adaptive TP/SL, trailing, partial TP, regime detection)
-2. **Test in paper mode for 24 hours** (200+ trades)
-3. **Monitor balance growth, win rate, fee drag**
-4. **Evaluate with multi-layer evaluator** (5 layers: per-trade, aggregate, baseline, decision gate, report)
-5. **If WIN**: persist changes, commit + push, apply to main + alpha
-6. **If LOSE**: rollback, log to learning log, analyze why, iterate
+1. **Implement Phase 1 in wave bot** (remove gates, add adaptive TP/SL, trailing, partial TP, regime detection, Roll Measure filter, VPIN filter, herding detection)
+2. **Optimize hot path** (incremental features, zero-copy parsing, Numba JIT, pre-allocated buffers, TCP_NODELAY)
+3. **Test in paper mode for 24 hours** (200+ trades)
+4. **Monitor balance growth, win rate, fee drag, latency**
+5. **Evaluate with multi-layer evaluator** (5 layers: per-trade, aggregate, baseline, decision gate, report)
+6. **If WIN**: persist changes, commit + push, apply to main + alpha
+7. **If LOSE**: rollback, log to learning log, analyze why, iterate
 
 ---
 
@@ -466,7 +551,7 @@ Fees     : -0.19$ (97 trades)
 - [ ] Trailing TP (only SL trails)
 - [ ] Adaptive TP based on volatility
 - [ ] Partial TP / scale-out
-- [ ] Order book depth analysis
+- [ ] Order book depth analysis (top-of-book only)
 - [ ] Funding rate integration
 - [ ] BTC correlation filter
 - [ ] Market regime detection
@@ -476,6 +561,17 @@ Fees     : -0.19$ (97 trades)
 - [ ] Adverse selection detection
 - [ ] Microstructure signals beyond bookTicker
 - [ ] Walk-forward optimization
+- [ ] Roll Measure filter (momentum confirmation)
+- [ ] VPIN filter (toxicity avoidance)
+- [ ] Herding detection (crowded trade avoidance)
+- [ ] Incremental feature computation (currently recomputes)
+- [ ] Zero-copy tick parsing (currently uses json.loads)
+- [ ] Numba JIT for hot-path numerics (currently pure Python)
+- [ ] Pre-allocated circular buffers (currently dynamic lists)
+- [ ] TCP_NODELAY on WebSocket (currently default)
+- [ ] Batched DB writes (currently per-tick)
+- [ ] Async notification (currently blocking)
+- [ ] Latency monitoring per tick
 
 ### Main Bot Missing
 - [ ] Adaptive TP based on volatility
@@ -486,6 +582,20 @@ Fees     : -0.19$ (97 trades)
 - [ ] Market regime detection
 - [ ] Dynamic position sizing
 - [ ] No notification on fills (notify_fill exists but not wired)
+- [ ] bank_08r SL trail broken in paper mode
+- [ ] CVD divergence veto-only, not entry amplifier
+- [ ] Adaptive weights mutates shared ParameterSurface
+- [ ] Roll Measure filter
+- [ ] VPIN filter
+- [ ] Herding detection
+- [ ] Incremental feature computation
+- [ ] Zero-copy tick parsing
+- [ ] Numba JIT for hot-path numerics
+- [ ] Pre-allocated circular buffers
+- [ ] TCP_NODELAY on WebSocket
+- [ ] Batched DB writes
+- [ ] Async notification
+- [ ] Latency monitoring per tick
 
 ### Alpha Bot Missing
 - [ ] All of the above
@@ -493,6 +603,18 @@ Fees     : -0.19$ (97 trades)
 - [ ] No real-time data collector wired to trading
 - [ ] Survival gates not fully wired (exist in code but not in runtime)
 - [ ] Fee constants not updated to current model
+- [ ] Exit engine type mismatch (broken)
+- [ ] Roll Measure filter
+- [ ] VPIN filter
+- [ ] Herding detection
+- [ ] Incremental feature computation
+- [ ] Zero-copy tick parsing
+- [ ] Numba JIT for hot-path numerics
+- [ ] Pre-allocated circular buffers
+- [ ] TCP_NODELAY on WebSocket
+- [ ] Batched DB writes
+- [ ] Async notification
+- [ ] Latency monitoring per tick
 
 ---
 
