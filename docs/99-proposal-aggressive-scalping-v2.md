@@ -48,8 +48,34 @@
 - No cross-asset correlation (BTC leader)
 - No volume profile / VPVR
 - No microstructure signals beyond bookTicker
-- Result: the bot is blind to market regime, liquidity conditions, and institutional flow
 
+**Problem 5: No partial TP / scale-out** (confirmed across all 3 bots)
+- Wave: fixed TP at 1.5R, no partial close
+- Main: fixed TP at 2.25x ATR (scalp), no partial close
+- Alpha: no adaptive TP at all
+- Result: borderline TP hits round-trip to scratch instead of locking in partial profit
+
+**Problem 6: bank_08r SL trail broken in paper mode** (main bot)
+- PaperSimExchange has no update_sl() method — trailing stop silently does nothing
+- SL modified in Position object but never executed on the exchange
+- Trail is purely cosmetic in paper mode
+
+**Problem 7: CVD divergence is veto-only, not entry amplifier** (wave + main)
+- CVD z-score used only as hard block/no-block in Gate A
+- Not fed to scoring engines — doesn't influence the score, only blocks trades
+- Should amplify entries when CVD aligns with direction
+
+**Problem 8: Adaptive weights mutates shared ParameterSurface** (main bot)
+- adaptive_weights() directly sets surface.weights.trend etc. — side effect persists across ticks
+- Can cause weight drift over time
+
+**Problem 9: Alpha bot survival gate is pass-through** (alpha bot)
+- survival_gate() exists in code but not wired into runtime
+- Universe ranker only scoring 50/677 pairs and not affecting pair selection
+- Exit engine has type mismatch preventing proper execution
+- Fee constants not updated to current model
+
+### 2. WHAT THE WAVE BOT DOES NOT HAVE (that could improve it)
 **Problem 5: No adaptive TP**
 - Wave: fixed TP at 1.5R (ATR-based, ~2x ATR)
 - Main: fixed TP at 2.25x ATR (scalp), 2.5x (day), 4x (swing)
