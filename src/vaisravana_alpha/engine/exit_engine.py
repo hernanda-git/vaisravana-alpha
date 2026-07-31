@@ -376,11 +376,11 @@ class FactorPipeline:
             elif imbalance < -0.3:  # 30% more buys (for short positions)
                 scores.append(abs(imbalance) * 0.5)  # less exit pressure for shorts
 
-        # CVD divergence: price up but CVD down
-        cvd = getattr(context, "cvd", 0)
-        cvd_prev = getattr(context, "cvd_prev", 0)
+        # CVD divergence: price up but CVD (flow_delta) declining — institutional distribution
+        cvd = getattr(context, "flow_delta", 0)
+        cvd_prev = getattr(context, "flow_delta_prev", 0)
         if cvd_prev > 0 and cvd < cvd_prev * 0.5:
-            scores.append(0.7)  # CVD collapsing
+            scores.append(0.7)  # CVD collapsing — smart money exiting
 
         # Liquidity sweep: price spiked beyond recent range then reversed
         if self._detect_liquidity_sweep(tick):

@@ -369,18 +369,32 @@ class AlphaEngine:
 
     async def _try_open(self, pair: str, ctx, bias, confidence: float) -> None:
         """Scan both directions and open whatever passes."""
+        # V0.1: derive regime from context so TP can adapt.
+        # Regime is stored in ctx.risk_regime as a float (-1..+1).
+        # We classify it into 3 bands for TP scaling.
+        risk_regime = getattr(ctx, "risk_regime", 0.0)
+        # Map -1..+1 to a regime string used by TP scaler.
+        if risk_regime > 0.3:
+            regime_label = "trending_bull"
+        elif risk_regime < -0.3:
+            regime_label = "trending_bear"
+        else:
+            regime_label = "range"
+
         for side in SIDES:
             if self.manager.in_cooldown(pair, side):
                 continue
             candidate = scan(
                 pair, side, self.settings.decision_tf,
                 bias, confidence, ctx, self.zones, adx=20,
+                regime_label=regime_label,
             )
             if candidate is None:
                 continue
 
             wave = self.manager.open(
-                candidate, bias, confidence, ctx, self.surface, self.wallet
+                candidate, bias, confidence, ctx, self.surface, self.wallet,
+                regime_label=regime_label,
             )
             if wave is None:
                 continue

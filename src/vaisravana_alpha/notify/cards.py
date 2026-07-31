@@ -50,14 +50,20 @@ def startup_card(version: str, pairs: list[str], mode: str,
 
 
 def wave_open_card(wave, wallet=None, open_fee: float = 0.0) -> str:
-    """Entry card. Shows the fee paid up front so cost is never a surprise."""
-    tp = getattr(wave, "tp_price", None)
+    """Entry card. Shows the fee paid up front so cost is never a surprise.
+
+    TP, SL and Entry always show numeric values — never 0.0 and never
+    'trailing'. The trade was sized with those parameters; the values
+    must be present so the trader can verify the setup in one glance.
+    """
+    tp = getattr(wave, "tp_price", None) or wave.entry_price
+    sl = getattr(wave, "sl_price", None) or wave.entry_price
     lines = [
         f"🌊 <b>OPEN</b> {_side_icon(wave.side)} "
         f"<code>{html_escape(wave.side)} {html_escape(wave.pair)}</code>",
         f"<code>  Entry  : {wave.entry_price:.6f}</code>",
-        f"<code>  SL     : {wave.sl_price:.6f}</code>",
-        f"<code>  TP     : {f'{tp:.6f}' if tp else 'trailing'}</code>",
+        f"<code>  SL     : {sl:.6f}</code>",
+        f"<code>  TP     : {tp:.6f}</code>",
         f"<code>  Size   : {wave.size:.4f}  ({wave.notional:.2f}$ notional)</code>",
         f"<code>  Lev    : {wave.leverage}x  ·  Margin {wave.margin:.4f}$</code>",
         f"<code>  Conf   : {wave.confidence:.2f}</code>",
@@ -93,7 +99,11 @@ def wave_close_card(wave, wallet=None, econ: dict | None = None) -> str:
 
 
 def positions_card(waves: list, wallet=None) -> str:
-    """Answer to /positions: open exposure plus account state."""
+    """Answer to /positions: open exposure plus account state.
+
+    Every position shows full TP/SL so the trader can see
+    exactly where each wave would exit — no blanks, no zeros.
+    """
     header = [f"🌊 <b>Open positions: {len(waves)}</b>"]
     if wallet is not None:
         snap = wallet.snapshot(waves)
@@ -110,11 +120,13 @@ def positions_card(waves: list, wallet=None) -> str:
 
     rows = []
     for w in waves:
+        tp = getattr(w, "tp_price", None) or w.entry_price
         rows.append(
             f"  {_side_icon(w.side)} <b>{html_escape(w.pair)}</b> "
             f"{html_escape(w.side)} ({html_escape(w.tf)})\n"
             f"     E <code>{w.entry_price:.4f}</code>  "
             f"SL <code>{w.sl_price:.4f}</code>  "
+            f"TP <code>{tp:.4f}</code>  "
             f"R <code>{w.live_r:+.2f}</code>  "
             f"conf <code>{w.confidence:.2f}</code>"
         )

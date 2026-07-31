@@ -145,6 +145,7 @@ class Candidate:
     strength: float
     ts: float
     reason: str = ""
+    regime_label: str = "range"
 
 
 # ── Tick context ─────────────────────────────────────────────────────────────

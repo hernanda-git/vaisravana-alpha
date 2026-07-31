@@ -75,11 +75,15 @@ class WaveManager:
 
     def open(self, candidate: Candidate, bias: BiasReading,
              confidence: float, ctx: TickContext,
-             surface, wallet=None) -> Optional[Wave]:
+             surface, wallet=None, regime_label: str = "range") -> Optional[Wave]:
         """Open a new wave from a validated candidate.
 
         Sizes realistically (leverage + margin + Binance min-notional),
-        sets SL + TP, charges the open taker fee, and stops if broke.
+        sets SL + TP (regime-adaptive), charges the open taker fee, and stops if broke.
+
+        regime_label controls TP width: 'trending_bull'/'trending_bear' get 3.0x ATR TP,
+        'range' gets 1.5x ATR TP. This lets winners run in trends and banks quick hits
+        in choppy markets.
         """
         key = (candidate.pair, candidate.side)
         if key in self.cooldowns:
@@ -169,11 +173,18 @@ class WaveManager:
             wave.anchor = ctx.price + buffer
         wave.sl_price = wave.anchor
 
-        # Take-profit scaled to volatility (reachable target, not fixed 1.5R
-        # that the tape can never travel). Aim for ~2x ATR so winners actually
-        # get hit in normal conditions; floor at 1.0% so calm pairs still pay.
+        # Take-profit scaled to volatility AND regime.
+        # Trending regimes get wider TP (let winners run).
+        # Range regimes get tighter TP (bank quick hits).
         atr = _atr_pct(ctx, candidate.tf)
-        tp_dist = max(ctx.price * 0.010, ctx.price * atr * 2.0)
+        base_tp_mult = 2.0
+        if regime_label == "trending_bull" or regime_label == "trending_bear":
+            # Trending: give the trade room to breathe, TP at 3.0x ATR
+            base_tp_mult = 3.0
+        elif regime_label == "range":
+            # Range: tighter TP at 1.5x ATR to bank quick wins
+            base_tp_mult = 1.5
+        tp_dist = max(ctx.price * 0.010, ctx.price * atr * base_tp_mult)
         risk = abs(wave.entry_price - wave.anchor)
         # Keep R consistent: TP distance should be >= risk so a win pays >1R.
         tp_dist = max(tp_dist, risk * 1.2)
