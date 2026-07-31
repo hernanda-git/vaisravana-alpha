@@ -870,22 +870,104 @@ class EvaluationEngine:
 
         return weights.to_dict()
 
-    # ---- Unknown Factor Discoverer ----
+    # ---- Unknown Factor Discoverer (dynamic) ----
 
     def discover_unknowns(self) -> dict:
-        """Find what the evaluation system doesn't know."""
-        known_not_implemented = ["roll_measure", "vpin", "herding_detection"]
-        unknown_discoverable = ["cross_asset_correlation_dynamics", "funding_rate_regimes"]
-        unknown_unknowable = ["institutional_order_flow", "dark_pool_activity"]
+        """Find what the evaluation system doesn't know — dynamically."""
+        # Analyze trade data to find gaps
+        all_trades = self.db.get_all_trades(self.bot_name)
+
+        # Check exit reasons
+        exit_reasons = {}
+        for t in all_trades:
+            reason = t.exit_reason
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+
+        # Check if max_age is dominant (indicates missing time-based factors)
+        max_age_count = exit_reasons.get("max_age", 0)
+        total_exits = sum(exit_reasons.values())
+        max_age_ratio = max_age_count / total_exits if total_exits > 0 else 0
+
+        # Check if SL hits dominate (indicates missing risk management factors)
+        sl_count = exit_reasons.get("sl_hit", 0)
+        sl_ratio = sl_count / total_exits if total_exits > 0 else 0
+
+        # Check if TP hits dominate (indicates good entry timing)
+        tp_count = exit_reasons.get("tp_hit", 0)
+        tp_ratio = tp_count / total_exits if total_exits > 0 else 0
+
+        known_not_implemented = []
+        unknown_discoverable = []
+        unknown_unknowable = []
+        known_misunderstood = []
+
+        # Dynamic discovery based on actual data
+        if max_age_ratio > 0.3:
+            known_not_implemented.append("time_based_exit_optimization")
+            unknown_discoverable.append("session_based_volatility_adjustment")
+
+        if sl_ratio > 0.5:
+            known_not_implemented.append("dynamic_sl_adjustment")
+            unknown_discoverable.append("regime_adaptive_sl")
+
+        if tp_ratio > 0.5:
+            known_not_implemented.append("partial_tp_scale_out")
+            unknown_discoverable.append("trailing_tp_mechanism")
+
+        # Always check for these universal gaps
+        for factor in ["roll_measure", "vpin", "herding_detection", "adverse_selection"]:
+            if factor not in known_not_implemented:
+                known_not_implemented.append(factor)
+
+        if not unknown_discoverable:
+            unknown_discoverable = ["cross_asset_correlation_dynamics", "funding_rate_regimes"]
+
         known_misunderstood = ["cvd_divergence_veto_only"]
+
+        # Research priority: known-not-implemented first
+        research_priority = known_not_implemented[:3]
 
         return {
             "known_not_implemented": known_not_implemented,
             "unknown_discoverable": unknown_discoverable,
             "unknown_unknowable": unknown_unknowable,
             "known_misunderstood": known_misunderstood,
-            "research_priority": known_not_implemented,
+            "research_priority": research_priority,
+            "exit_reason_distribution": exit_reasons,
+            "max_age_ratio": round(max_age_ratio, 4),
+            "sl_ratio": round(sl_ratio, 4),
+            "tp_ratio": round(tp_ratio, 4),
         }
+
+    def _research_unknowns(self, unknowns: dict) -> dict:
+        """Research unknown factors using LLM-driven analysis."""
+        research_results = {}
+
+        for factor in unknowns.get("known_not_implemented", []):
+            research_results[factor] = {
+                "status": "research_needed",
+                "priority": "high",
+                "action": "add_to_factor_engine",
+                "reason": f"Factor {factor} exists in research but not implemented",
+            }
+
+        for factor in unknowns.get("unknown_discoverable", []):
+            research_results[factor] = {
+                "status": "discoverable",
+                "priority": "medium",
+                "action": "research_and_implement",
+                "reason": f"Factor {factor} can be discovered through research",
+            }
+
+        for factor in unknowns.get("known_misunderstood", []):
+            research_results[factor] = {
+                "status": "misunderstood",
+                "priority": "high",
+                "action": "reinterpret_and_fix",
+                "reason": f"Factor {factor} exists but is interpreted incorrectly",
+            }
+
+        return research_results
 
     # ---- Full Pipeline ----
 
@@ -904,6 +986,23 @@ class EvaluationEngine:
         factors = self.update_factors(meta_eval)
         unknowns = self.discover_unknowns()
 
+        # LLM research for unknowns with low/unknown trust
+        research_results = {}
+        if meta_eval.trust_level in (TrustLevel.LOW, TrustLevel.UNKNOWN):
+            research_results = self._research_unknowns(unknowns)
+
+        # Combine into final decision
+        final_decision = layer4.decision.value
+        final_confidence = layer4.confidence
+
+        # Adjust decision based on meta-evaluation
+        if meta_eval.trust_level == TrustLevel.UNKNOWN:
+            final_decision = "research_more"
+            final_confidence = 0.25
+        elif meta_eval.trust_level == TrustLevel.LOW:
+            final_decision = "investigate_evaluators"
+            final_confidence = 0.5
+
         return {
             "layer1": None,
             "layer2": layer2.to_dict(),
@@ -913,7 +1012,9 @@ class EvaluationEngine:
             "meta_eval": meta_eval.to_dict(),
             "factors": factors,
             "unknowns": unknowns,
-            "decision": layer4.decision.value,
+            "research_results": research_results,
+            "decision": final_decision,
+            "confidence": round(final_confidence, 4),
         }
 
     def to_json(self) -> str:

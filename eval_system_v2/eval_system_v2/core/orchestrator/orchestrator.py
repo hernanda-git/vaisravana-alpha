@@ -15,7 +15,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
-from eval_system_v2.core.engine.eval_engine import (
+from eval_system.core.engine.eval_engine import (
     EvaluationEngine,
     Layer2Output,
     Layer3Output,
