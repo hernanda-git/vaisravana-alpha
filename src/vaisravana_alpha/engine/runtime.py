@@ -207,6 +207,24 @@ class AlphaEngine:
         self.state.stop_requested = False
         self.state.halt_reason = ""
         try:
+            # Also clear any stale flag from a previous crash or
+            # incomplete shutdown. The flag is only meaningful when
+            # /stop was explicitly called; a stale flag from a crash
+            # or an old container restart must never block trading.
+            flag = self.settings.stop_flag_path
+            if os.path.exists(flag):
+                age_secs = time.time() - os.path.getmtime(flag)
+                with open(flag) as fh:
+                    _, prev_reason = fh.read().split("\n", 1)
+                # If the flag was written more than 60s ago, it is
+                # a stale artifact — clear it on boot automatically.
+                if age_secs > 60:
+                    os.remove(flag)
+                    log.info(
+                        "stale stop flag removed (age %.0fs, reason: %s)",
+                        age_secs, prev_reason.strip(),
+                    )
+                    return
             os.remove(self.settings.stop_flag_path)
         except OSError:
             pass
