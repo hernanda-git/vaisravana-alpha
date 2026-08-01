@@ -77,11 +77,9 @@ def env_list(key: str, default: list[str]) -> list[str]:
     return [p.strip() for p in val.split(",") if p.strip()]
 
 
-_DEFAULT_PAIRS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "1000BONKUSDT",
-    "ENAUSDT", "WLDUSDT", "PENGUUSDT", "AAVEUSDT", "TAOUSDT",
-    "INJUSDT", "APEUSDT", "PUMPUSDT", "WIFUSDT", "CRVUSDT",
-]
+# Universe ranker populates this list dynamically from Binance exchangeInfo.
+# Default empty — ranker fetches all active futures pairs on boot.
+_DEFAULT_PAIRS: list[str] = []
 
 
 @dataclass(frozen=True)

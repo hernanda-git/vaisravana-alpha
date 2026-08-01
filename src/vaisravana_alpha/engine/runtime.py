@@ -141,6 +141,19 @@ class AlphaEngine:
             bottom_n=5,
         )
         set_universe_ranker(self._universe_ranker)
+        # Populate settings.pairs from universe ranker if empty
+        if not self.settings.pairs:
+            all_pairs = self._universe_ranker.get_active_pairs()
+            if all_pairs:
+                object.__setattr__(self.settings, 'pairs', all_pairs)
+                log.info("universe: populated %d pairs from exchangeInfo", len(all_pairs))
+            else:
+                log.warning("universe: no pairs from exchangeInfo, using fallback")
+                object.__setattr__(self.settings, 'pairs', [
+                    "BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "1000BONKUSDT",
+                    "ENAUSDT", "WLDUSDT", "PENGUUSDT", "AAVEUSDT", "TAOUSDT",
+                    "INJUSDT", "APEUSDT", "PUMPUSDT", "WIFUSDT", "CRVUSDT",
+                ])
         self._universe_task: asyncio.Task | None = None
 
     # -- agentic telemetry -------------------------------------------------
