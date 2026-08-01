@@ -29,14 +29,14 @@ from vaisravana_alpha.storage.db import init_db
 log = logging.getLogger("vaisravana_alpha")
 
 COMMANDS = [
-    ("alpha-status", "Bot status, WR, trades, positions, balance"),
-    ("alpha-performance", "Detailed performance: WR, avg R, net PnL, fees"),
-    ("alpha-positions", "Open positions with live PnL, SL, TP, R"),
-    ("alpha-trades", "Recent trades history with results"),
-    ("alpha-version", "Current version, changelog, uptime"),
-    ("alpha-stop", "Graceful shutdown after current cycle"),
-    ("alpha-resume", "Resume trading (if stopped)"),
-    ("alpha-help", "List all available commands"),
+    ("alpha_status", "Bot status, WR, trades, positions, balance"),
+    ("alpha_performance", "Detailed performance: WR, avg R, net PnL, fees"),
+    ("alpha_positions", "Open positions with live PnL, SL, TP, R"),
+    ("alpha_trades", "Recent trades history with results"),
+    ("alpha_version", "Current version, changelog, uptime"),
+    ("alpha_stop", "Graceful shutdown after current cycle"),
+    ("alpha_resume", "Resume trading (if stopped)"),
+    ("alpha_help", "List all available commands"),
 ]
 
 
