@@ -201,6 +201,8 @@ class WaveManager:
         # (past the live-dup guard above AND the cap above). Charging before
         # the cap caused cap-rejected waves to pay a phantom fee (360 fake
         # trades in run13). Now a fee is paid exactly once per real opening.
+        # NOTE: fee is charged here in manager.open() — do NOT charge again in
+        # runtime._try_open() to avoid double-charging.
         if wallet is not None:
             wallet.charge_open_fee(notion)
 
@@ -447,10 +449,7 @@ class WaveManager:
             closed_size = wave.size * fraction
             wave.size -= closed_size
             wave.notional = wave.notional * (1.0 - fraction)
-            # open_fee is sunk cost; only charge close fee on the closed part.
-            close_notional = wave.notional + closed_size * (
-                wave.entry_price if wave.entry_price else 0
-            ) * 0  # placeholder; see below
+            # close_notional for fee calculation: the notional of the closed portion
             close_notional = closed_size * (wave.entry_price or 0)
         else:
             close_notional = wave.notional

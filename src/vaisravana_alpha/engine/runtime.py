@@ -432,6 +432,9 @@ class AlphaEngine:
 
             record_open(pair)
             self.state.opens += 1
+            # NOTE: open fee is already charged in manager.open() — do NOT
+            # charge again here. We only compute the fee value for logging
+            # and the notification card.
             open_fee = wave.notional * self.wallet.open_fee_rate
             wave._open_fee = open_fee
             log.info(
