@@ -398,9 +398,26 @@ class WaveManager:
             if conf:
                 return WaveAction(type="CLOSE", reason=f"smc_break_{ztype}", wave=wave, price=tick.price)
 
-        # 5. Anti-stuck: force-close after MAX_WAVE_AGE_S if nothing else exited.
-        # Without this a sideways market leaves the wave open forever (balance frozen).
+        # 5. Anti-stuck + time-based TP catch: force-close after MAX_WAVE_AGE_S.
+        # Fee-aware: if the wave is still -EV after fees at this point, close
+        # immediately (the trade cannot recover). Otherwise use as a TP catch
+        # at a modest target so the bot doesn't grind winners to zero.
         if wave.open_ts and (now - wave.open_ts) >= MAX_WAVE_AGE_S:
+            # Check if still -EV after fees at current price
+            notional = wave.notional or (wave.size * wave.entry_price) if wave.entry_price else 0.0
+            if notional > 0:
+                close_fee = notional * 0.0004  # taker close fee
+                risk_per_r = notional * (abs(wave.entry_price - wave.anchor) / wave.entry_price) if wave.entry_price else 0.0
+                fee_floor = close_fee / risk_per_r if risk_per_r > 0 else 0.0
+                # If live R is below the fee floor, close immediately (cannot recover)
+                if wave.live_r < fee_floor:
+                    return WaveAction(type="CLOSE", reason="max_age_fev", wave=wave, price=tick.price)
+            # Otherwise: time-based TP catch at +0.15R — lock a small winner
+            # instead of letting the wave grind to max_age at -R
+            if wave.live_r >= 0.15:
+                return WaveAction(type="CLOSE", reason="max_age_tp", wave=wave, price=tick.price)
+            # Below +0.15R but max_age hit: close at market (better than holding
+            # indefinitely in a dead market)
             return WaveAction(type="CLOSE", reason="max_age", wave=wave, price=tick.price)
 
         return None
