@@ -141,20 +141,97 @@ class AlphaEngine:
             bottom_n=5,
         )
         set_universe_ranker(self._universe_ranker)
-        # Populate settings.pairs from universe ranker if empty
+
+        # ── Pair list: use only top N from universe ranker ─────────────────
+        # Binance WS payload limit: ~64KB per SUBSCRIBE message.
+        # 677 pairs × 6 stream types = 4,062 streams → ~200KB → rejected.
+        # Solution: use only top 5 pairs (3 strongest + 2 weakest)
+        # from the universe ranker. This gives ~30 streams, well within limits.
+        # For a $10 account, fewer pairs = less fee bleed + more capital per trade.
+        # BTCUSDT excluded: min-notional $100 > $10 balance.
+        self._universe_task: asyncio.Task | None = None
+
+        # Global trade rate limiter: prevent overtrading.
+        # Data showed 71 trades in 5 minutes → $0.146 in fees eaten the account.
+        # Limit to max 1 trade per 60 seconds globally (across all pairs).
+        self._trade_cooldown_s = 60.0
+        self._last_trade_ts = 0.0
+
+        # Fetch initial pair list from ranker
         if not self.settings.pairs:
+            if not self._universe_ranker.all_pairs:
+                log.info("universe: fetching active pairs from Binance API")
+                self._universe_ranker.all_pairs = self._universe_ranker._fetch_active_pairs_sync()
+                log.info("universe: got %d pairs from API", len(self._universe_ranker.all_pairs))
+            # Fallback: use raw pairs (will be refined by universe task)
             all_pairs = self._universe_ranker.get_active_pairs()
             if all_pairs:
-                object.__setattr__(self.settings, 'pairs', all_pairs)
-                log.info("universe: populated %d pairs from exchangeInfo", len(all_pairs))
-            else:
-                log.warning("universe: no pairs from exchangeInfo, using fallback")
-                object.__setattr__(self.settings, 'pairs', [
-                    "BTCUSDT", "ETHUSDT", "SOLUSDT", "1000PEPEUSDT", "1000BONKUSDT",
-                    "ENAUSDT", "WLDUSDT", "PENGUUSDT", "AAVEUSDT", "TAOUSDT",
-                    "INJUSDT", "APEUSDT", "PUMPUSDT", "WIFUSDT", "CRVUSDT",
-                ])
-        self._universe_task: asyncio.Task | None = None
+                object.__setattr__(self.settings, 'pairs', all_pairs[:20])
+                log.info("universe: populated %d pairs from raw list (will be refined by ranker)", len(self.settings.pairs))
+
+    # -- initial pair selection from universe ranker -----------------------
+
+    # -- pair refinement from universe ranker --------------------------------
+
+    async def _refine_pair_list(self) -> None:
+        """Refine the pair list to top 5 from universe ranker after first score."""
+        ranked = self._universe_ranker.ranked
+        if not ranked or len(ranked) < 5:
+            return
+
+        # Select 3 strongest + 2 weakest, EXCLUDE BTCUSDT (too expensive for $10)
+        strongest_pairs = [s.pair for s in ranked[:3]]
+        weakest_pairs = [s.pair for s in ranked[-2:]]
+
+        # Remove BTCUSDT from selection
+        strongest_pairs = [p for p in strongest_pairs if p != "BTCUSDT"]
+        weakest_pairs = [p for p in weakest_pairs if p != "BTCUSDT"]
+
+        # Fill from ranked list if we lost pairs to BTCUSDT exclusion
+        pair_set = set(strongest_pairs + weakest_pairs)
+        for s in ranked:
+            if s.pair not in pair_set and s.pair != "BTCUSDT":
+                if len(strongest_pairs) < 3:
+                    strongest_pairs.append(s.pair)
+                elif len(weakest_pairs) < 2:
+                    weakest_pairs.append(s.pair)
+                pair_set.add(s.pair)
+            if len(strongest_pairs) >= 3 and len(weakest_pairs) >= 2:
+                break
+
+        selected = list(set(strongest_pairs + weakest_pairs))
+        if len(selected) < 5:
+            for s in ranked:
+                if s.pair not in selected and s.pair != "BTCUSDT":
+                    selected.append(s.pair)
+                if len(selected) >= 5:
+                    break
+
+        object.__setattr__(self.settings, 'pairs', selected)
+        log.info(
+            "universe: refined to %d pairs — strongest=%s weakest=%s",
+            len(selected), strongest_pairs, weakest_pairs,
+        )
+
+        # Restart feeds with new pair list
+        if self._feed:
+            await self._feed.stop()
+        if self._poller:
+            self._poller.stop()
+            # Update RestPoller with new pair list
+            self._poller._pairs = list(selected)
+
+        # Reconnect after a short delay
+        await asyncio.sleep(5)
+
+        if self._feed:
+            asyncio.create_task(
+                self._feed.connect(selected, on_ready=lambda: setattr(self.state, 'feed_ok', True)),
+                name="ws-feed-refixed",
+            )
+        if self._poller:
+            asyncio.create_task(self._poller.run(), name="rest-feed-refixed")
+        log.info("universe: feeds restarted with %d pairs", len(selected))
 
     # -- agentic telemetry -------------------------------------------------
 
@@ -393,6 +470,15 @@ class AlphaEngine:
             self._record_rejection("warmup", pair, f"{elapsed:.0f}s elapsed")
             return False
 
+        # Global trade rate limiter: prevent overtrading.
+        # Data showed 71 trades in 5 minutes → $0.146 in fees eaten the account.
+        # Limit to max 1 trade per 60 seconds globally (across all pairs).
+        now = time.time()
+        if now - self._last_trade_ts < self._trade_cooldown_s:
+            self._record_rejection("rate_limit", pair,
+                                   f"cooldown {self._trade_cooldown_s - (now - self._last_trade_ts):.0f}s")
+            return False
+
         # Fee-aware expected value. `atr_pct` is a module function, not a
         # manager method: calling it off the instance returns nothing and
         # silently zeroes the estimate, which vetoes every trade.
@@ -445,6 +531,8 @@ class AlphaEngine:
 
             record_open(pair)
             self.state.opens += 1
+            # Update global trade rate limiter timestamp
+            self._last_trade_ts = time.time()
             # NOTE: open fee is already charged in manager.open() — do NOT
             # charge again here. We only compute the fee value for logging
             # and the notification card.
@@ -560,11 +648,14 @@ class AlphaEngine:
         """Dispatch a Telegram slash command."""
         command = text.split()[0].split("@")[0].lower()
 
-        if command in ("/positions", "/wave"):
+        # Strip alpha_ prefix so /alpha_status and /status both work
+        base = command.replace("/alpha_", "/").replace("/alpha", "/")
+
+        if base in ("/positions", "/wave"):
             self._notify(cards.positions_card(self.state.open_waves, self.wallet))
-        elif command in ("/performance", "/surf"):
+        elif base in ("/performance", "/surf"):
             self._notify(cards.performance_card(self.state.closed_waves, self.wallet))
-        elif command == "/status":
+        elif base == "/status":
             self._notify(cards.status_card(
                 version=_version(),
                 uptime_s=self.state.uptime_s,
@@ -574,12 +665,51 @@ class AlphaEngine:
                 ticks=self.state.ticks,
                 throttle_cap=current_cap(),
             ))
-        elif command == "/stop":
+        elif base == "/stop":
             self.request_stop("owner /stop")
             self._notify(cards.halt_card("owner /stop", self.wallet.balance))
-        elif command == "/resume":
+        elif base == "/resume":
             self.clear_stop()
             self._notify("▶️ <b>Stop flag cleared.</b> Restart to resume trading.")
+        elif base == "/help":
+            self._notify(self._help_card())
+        elif base in ("/universe", "/alpha_universe"):
+            self._notify(self._universe_card())
+        else:
+            self._notify(f"Unknown command: {command}. Send /alpha_help for list.")
+
+    def _help_card(self) -> str:
+        """List all available slash commands."""
+        return "\n".join([
+            "<b>Alpha bot commands:</b>",
+            "/alpha_status — Bot status: pairs, positions, balance, feed health",
+            "/alpha_performance — Performance: WR, avg R, net PnL, fees, expectancy",
+            "/alpha_positions — Open positions with live PnL, SL, TP, R-multiple",
+            "/alpha_trades — Recent trades history with results and PnL",
+            "/alpha_universe — Current universe: top 7 strongest + 7 weakest pairs",
+            "/alpha_stop — Graceful shutdown after current cycle",
+            "/alpha_resume — Resume trading (if stopped)",
+            "/alpha_help — This help message",
+        ])
+
+    def _universe_card(self) -> str:
+        """Show current universe: top 7 strongest + 7 weakest pairs."""
+        if self._universe_ranker is None or not self._universe_ranker.ranked:
+            return "<i>Universe ranker not initialized yet.</i>"
+        strongest = self._universe_ranker.strongest(7)
+        weakest = self._universe_ranker.weakest(7)
+        lines = ["<b>Alpha Universe (mean-reversion ranked):</b>"]
+        lines.append("<i>Strongest = most oversold → BUY candidates</i>")
+        for s in strongest:
+            lines.append(f"  {s.pair:15s} score={s.total_score:+.3f}  RSI={s.rsi_14:.1f}  VWAP={s.vwap_distance:+.3f}  CVD={s.cvd_divergence:+.3f}")
+        lines.append("")
+        lines.append("<i>Weakest = most overbought → SELL candidates</i>")
+        for w in weakest:
+            lines.append(f"  {w.pair:15s} score={w.total_score:+.3f}  RSI={w.rsi_14:.1f}  VWAP={w.vwap_distance:+.3f}  CVD={w.cvd_divergence:+.3f}")
+        lines.append("")
+        lines.append(f"Total ranked: {len(self._universe_ranker.ranked)} pairs")
+        lines.append(f"Current trading pairs: {len(self.settings.pairs)}")
+        return "\n".join(lines)
 
     # -- main loop ---------------------------------------------------------
 
@@ -648,6 +778,7 @@ class AlphaEngine:
 
         # Universe ranker — background task, updates every 60s
         async def _run_universe() -> None:
+            first_update = True
             while True:
                 try:
                     await self._universe_ranker.update()
@@ -659,6 +790,11 @@ class AlphaEngine:
                         [(s.pair, round(s.total_score, 3)) for s in strongest],
                         [(s.pair, round(s.total_score, 3)) for s in weakest],
                     )
+
+                    # After first successful score, refine pair list to top 15
+                    if first_update:
+                        first_update = False
+                        await self._refine_pair_list()
                 except Exception as exc:
                     log.warning("universe ranker update failed: %s", exc)
                 await asyncio.sleep(60)

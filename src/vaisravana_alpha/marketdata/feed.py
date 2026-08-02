@@ -246,6 +246,27 @@ class FeedMux:
             "id": 1,
         })
 
+    async def _subscribe_chunked(self, ws, streams: list[str]) -> None:
+        """Subscribe to streams in chunks to avoid payload-too-long errors.
+
+        Binance rejects SUBSCRIBE messages that exceed ~64KB. With 677 pairs
+        × 6 stream types = 4,062 streams, a single message is ~200KB.
+        Chunk into batches of ~50 pairs (300 streams) per message.
+        IMPORTANT: Binance rate-limits SUBSCRIBE requests — add delay between
+        chunks to avoid 1008 policy violation errors.
+        """
+        CHUNK = 50
+        for i in range(0, len(streams), CHUNK):
+            chunk = streams[i:i + CHUNK]
+            msg = self._build_subscribe_msg(chunk)
+            await ws.send(msg)
+            log.info("FeedMux subscribed to %d streams (chunk %d/%d)",
+                     len(chunk), i // CHUNK + 1, (len(streams) + CHUNK - 1) // CHUNK)
+            # Binance rate-limits SUBSCRIBE: 100ms between chunks prevents
+            # 1008 policy violation errors on large stream sets.
+            if i + CHUNK < len(streams):
+                await asyncio.sleep(0.1)
+
     async def connect(
         self,
         streams: list[str],
@@ -276,7 +297,7 @@ class FeedMux:
                     ping_timeout=10,
                 ) as ws:
                     self._ws = ws
-                    await ws.send(self._build_subscribe_msg(streams))
+                    await self._subscribe_chunked(ws, streams)
                     log.info("FeedMux subscribed to %d streams", len(streams))
                     if on_ready:
                         try:

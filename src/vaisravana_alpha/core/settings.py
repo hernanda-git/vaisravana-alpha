@@ -212,8 +212,8 @@ def load_settings() -> Settings:
         bot_username=env_str("BOT_USERNAME", ""),
     )
 
-    if not settings.pairs:
-        raise SystemExit("PAIRS resolved to an empty universe")
+    # Pairs are populated dynamically by runtime.py from universe ranker
+    # if empty; don't block boot here.
     if settings.paper_balance <= 0:
         raise SystemExit(f"PAPER_BALANCE must be > 0, got {settings.paper_balance}")
     if settings.fee_open < 0 or settings.fee_close < 0:

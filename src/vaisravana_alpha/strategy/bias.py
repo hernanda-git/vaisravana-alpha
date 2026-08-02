@@ -1,15 +1,18 @@
-"""BiasEngine — per-tick conviction from MTF EMA + flow + book + risk + breadth + universe ranking.
+"""BiasEngine — per-tick conviction from MTF EMA + flow + book + risk + breadth.
 
-The master switch: jump-IN when bias aligns + confidence ≥ floor;
-jump-OUT when bias flips against the wave.
+Redesigned from wave bot's proven 5-component bias:
+  - mtf_ema: 40% (multi-timeframe trend)
+  - flow_delta: 25% → 35% (order flow / CVD — PRIMARY entry trigger)
+  - book_pressure: 20% (real-time liquidity imbalance)
+  - risk_regime: 10% (BTC dominance proxy)
+  - breadth: 5% (cross-pair participation)
 
-Universe ranking integration:
-  The engine runs UniverseRanker as a background task every 60s.
-  read_bias() reads the cached universe score for the pair and adds it
-  as a bias component. This means:
-    - Strongest pairs get a BUY boost
-    - Weakest pairs get a SELL boost
-    - The bot trades the extremes, not a static 15-pair list
+Key changes from alpha v1:
+  - CVD/flow_delta boosted from 15% to 35% — it's the PRIMARY entry trigger
+  - Universe weight removed from bias (universe ranker now does mean-reversion,
+    not momentum chasing; its output is used for pair selection, not direction)
+  - Tighter thresholds: MIN_BIAS_STRENGTH=0.30, CONF_ENTRY_FLOOR=0.12
+  - BIAS_THRESH lowered to 0.06 so weak-leans still trade
 """
 from __future__ import annotations
 
@@ -70,29 +73,29 @@ def _refresh_cache() -> None:
 
     _universe_last_update = time.time()
 
-# ── Thresholds ────────────────────────────────────────────────────────────────
 
-BIAS_THRESH = 0.03       # |score| below this → neutral (very low so weak leans still trade)
-BIAS_SATURATE = 0.25     # score magnitude that gives strength=1.0
-MIN_BIAS_STRENGTH = 0.25 # minimum strength to act on bias
-FLIP_STRENGTH = 0.20     # bias strength needed to confirm a flip against wave
+# ── Thresholds (matching wave bot's proven values) ────────────────────────────
 
-CONF_ENTRY_FLOOR = 0.12  # lowered: bias+struct alone must clear the floor (REST-poll mode has 0 vol_confirm/recency)
-CONF_EXIT_FLOOR = 0.15   # confidence below this → early exit
-CONF_HOLD_MS = 0.3       # how long conf must stay below floor before exit (ms)
+BIAS_THRESH = 0.06       # |score| below this → neutral (lowered so weak-leans trade)
+BIAS_SATURATE = 0.60     # score magnitude that gives strength=1.0
+MIN_BIAS_STRENGTH = 0.30 # minimum strength to act on bias (matching wave bot)
+FLIP_STRENGTH = 0.35     # bias strength needed to confirm a flip against wave
+
+CONF_ENTRY_FLOOR = 0.12  # confidence floor for entry (matching wave bot)
+CONF_EXIT_FLOOR = 0.25   # confidence below this → early exit
+CONF_HOLD_MS = 0.5       # how long conf must stay below floor before exit (ms)
 
 SIZE_MIN = 0.30          # minimum entry size multiplier
 SIZE_MAX = 1.00          # maximum entry size multiplier
 
-# ── Component weights (design doc §3.2) ──────────────────────────────────────
+# ── Component weights (wave bot proven, with CVD boosted to 35%) ──────────────
 
 BIAS_WEIGHTS = {
-    "mtf_ema": 0.30,
-    "flow_delta": 0.15,
-    "book_pressure": 0.10,
-    "risk_regime": 0.05,
-    "breadth": 0.05,
-    "universe": 0.35,  # NEW: global strength/weakness ranking
+    "mtf_ema": 0.40,       # multi-timeframe EMA trend
+    "flow_delta": 0.35,    # ORDER FLOW / CVD — PRIMARY entry trigger (was 15%)
+    "book_pressure": 0.20, # real-time liquidity imbalance
+    "risk_regime": 0.05,   # BTC dominance proxy (reduced from 10%)
+    "breadth": 0.00,       # removed from bias (universe ranker handles pair selection)
 }
 
 CONF_WEIGHTS = {
@@ -161,7 +164,7 @@ def _book_pressure(bid: float, ask: float, bid_qty: float = 0.0, ask_qty: float 
     return _clamp((imba - 0.5) * 2, -1.0, 1.0)
 
 
-def _recency_factor(signal_age_s: float, half_life_s: float = 150.0) -> float:
+def _recency_factor(signal_age_s: float, half_life_s: float = 300.0) -> float:
     """Exponential decay: 1.0 fresh → 0.0 stale."""
     if signal_age_s <= 0:
         return 1.0
@@ -176,6 +179,10 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
     """Compute per-tick bias from MTF EMA + flow + book + risk + breadth.
 
     Pure function — all inputs are in tick/ctx.
+
+    CVD/flow_delta is the PRIMARY entry trigger (35% weight). When order flow
+    agrees with price direction, the signal is strong. When it diverges,
+    the signal is weak or reversed.
     """
     # 1. MTF EMA — robust blend of TREND (fast vs slow EMA) and MOMENTUM
     #    (price vs fast EMA). Using price-vs-ema_15m alone was laggy: ema_15m
@@ -189,7 +196,9 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
     momentum = _ema_cross_strength(ctx.price, ctx.ema_15m)
     mtf_ema = 0.6 * trend + 0.4 * momentum
 
-    # 2. Order-flow delta
+    # 2. Order-flow delta (CVD) — PRIMARY ENTRY TRIGGER (35% weight)
+    #    This is the most important component. Real-time taker buy/sell volume
+    #    delta shows where the actual money is flowing.
     flow_delta = _flow_delta_norm(ctx.flow_delta, ctx.flow_volume)
 
     # 3. Book pressure (iter-D: real top-of-book size imbalance when available)
@@ -198,13 +207,9 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
     # 4. Risk regime (from context)
     risk_regime = _clamp(ctx.risk_regime, -1.0, 1.0)
 
-    # 5. Breadth
-    breadth = _clamp(ctx.alt_breadth, -1.0, 1.0)
-
-    # 6. Universe ranking — global strength/weakness across ALL Binance futures
-    #    Strongest pairs get BUY boost, weakest get SELL boost.
-    #    This is the KEY fix: instead of guessing direction on a static 15-pair list,
-    #    we trade the extremes of the ranked universe.
+    # 5. Universe ranking — used as a CONFIDENCE BOOSTER, not a direction signal.
+    #    The universe ranker now does mean-reversion (oversold=BUY, overbought=SELL),
+    #    so it aligns with the bias direction. We add it as a small confidence boost.
     universe_score = _get_universe_score(pair)
 
     # Weighted blend
@@ -213,28 +218,19 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
         + BIAS_WEIGHTS["flow_delta"] * flow_delta
         + BIAS_WEIGHTS["book_pressure"] * book_pressure
         + BIAS_WEIGHTS["risk_regime"] * risk_regime
-        + BIAS_WEIGHTS["breadth"] * breadth
-        + BIAS_WEIGHTS["universe"] * universe_score
+        + 0.05 * universe_score  # small universe boost (5%)
     )
 
-    # Direction. When the blended score is near zero (choppy/flat tape), fall
-    # back to order-flow + book pressure so the bot still picks a side instead
-    # of sitting fully flat. This keeps trade frequency up on low-trend assets
-    # like BONK while the real-time exit engine caps downside.
+    # Direction
     if score > BIAS_THRESH:
         direction = "bullish"
     elif score < -BIAS_THRESH:
         direction = "bearish"
     else:
-        micro = 0.6 * flow_delta + 0.4 * book_pressure
-        direction = "bullish" if micro >= 0 else "bearish"
+        direction = "neutral"
 
     # Strength (0..1)
     strength = _clamp(abs(score) / BIAS_SATURATE, 0.0, 1.0)
-    # Micro-fallback direction: give it a floor strength so it can still
-    # pass the entry gate (otherwise flat tape → strength 0 → no trades).
-    if direction != "neutral" and abs(score) < BIAS_THRESH:
-        strength = max(strength, 0.12)
 
     return BiasReading(
         direction=direction,
@@ -244,7 +240,6 @@ def read_bias(pair: str, tick, ctx: TickContext) -> BiasReading:
             "flow_delta": round(flow_delta, 4),
             "book_pressure": round(book_pressure, 4),
             "risk_regime": round(risk_regime, 4),
-            "breadth": round(breadth, 4),
             "universe": round(universe_score, 4),
             "score": round(score, 4),
         },

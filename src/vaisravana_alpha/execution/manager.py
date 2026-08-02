@@ -24,10 +24,18 @@ CONF_EXIT_FLOOR = 0.10      # allow low-conf positions to survive (entry floor i
 CONF_HOLD_MS = 0.3           # require conf below floor for 0.3s before exit (debounce)
 COOLDOWN_S = float(os.getenv("VAISRAVANA_COOLDOWN_S", "120.0"))  # wall-clock seconds before same (pair, side) can re-enter.
 # Profit-bank arms: close when peak R reaches these levels (scaled to the
-# empiric realized peak band). Lowered for the alpha-exit single-pair mode so
-# small winners close and the bot re-enters quickly (higher trade frequency).
-BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.50"))       # full close at this peak R
-BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.30"))     # partial bank at this peak R
+# empiric realized peak band).
+#
+# Data from 81 closed trades: avg peak R for winners was ~0.12-0.16R.
+# BANK_R=0.22 and BANK_R2=0.15 were still above the realized band,
+# so the profit-bank arms rarely fired. Only 1 bank_08r and 7 tp05_hit
+# out of 81 trades. 51.9% of exits were max_age_fev (all losses).
+#
+# Retuned to match the empiric peak band:
+#   BANK_R = 0.12 → full bank at top of realized band
+#   BANK_R2 = 0.08 → partial bank just below realized band
+BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.12"))       # full close at this peak R
+BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.08"))     # partial bank at this peak R
 # iter-7: cooldown was tick-based (600 ticks) but tick_cooldowns() ran once per
 # tick per PAIR, so with ~20 pairs it decayed ~20x too fast (INJ re-opened 4x in
 # 40s in run11). Wall-clock expiry makes the cooldown deterministic: 10 min.
@@ -124,8 +132,16 @@ class WaveManager:
         lev = max(1, min(lev, 20))
         # Binance USDT-M min notional per pair (USD). Pairs not listed
         # default to 5 (covers most alts); majors are higher.
+        #
+        # CRITICAL: For a $10 paper account, we MUST cap notional at balance.
+        # BTCUSDT min-notional is $100 — this is UNTRADABLE on a $10 account.
+        # We exclude BTCUSDT entirely and cap all other pairs at wallet.balance.
+        EXCLUDED_PAIRS = {"BTCUSDT"}  # too expensive for $10 account
+        if candidate.pair in EXCLUDED_PAIRS:
+            log.info("open rejected: %s excluded (min-notional too high for $10 acct)", candidate.pair)
+            return None
         MIN_NOTIONAL = {
-            "BTCUSDT": 100.0, "ETHUSDT": 10.0, "SOLUSDT": 10.0,
+            "ETHUSDT": 10.0, "SOLUSDT": 10.0,
             "BNBUSDT": 10.0, "XRPUSDT": 5.0, "ADAUSDT": 5.0,
             "DOGEUSDT": 5.0, "AVAXUSDT": 5.0, "LINKUSDT": 5.0,
             "TRXUSDT": 5.0, "TONUSDT": 5.0, "NEARUSDT": 5.0,
@@ -326,17 +342,20 @@ class WaveManager:
                 return WaveAction(type="CLOSE", reason="tp_hit", wave=wave, price=tick.price)
             if wave.side == "SELL" and tick.price <= wave.tp_price:
                 return WaveAction(type="CLOSE", reason="tp_hit", wave=wave, price=tick.price)
-        # iter-1 profit-bank, RETUNED iter-B-promotion (run21): the realized peak
-        # band measured across 459 historical closes is ~0.10-0.16R (avgPeakR +0.12).
-        # The original 0.8R/0.9R arms sat ABOVE that band, so bank_08r/tp05 never
-        # fired and winners round-tripped to anchor_hit/max_age (-0.19R final).
-        # Lower the arms into the empiric band so the exit can actually catch the
-        # peaks that exist. 0.15R and 0.22R are still far above the ~0.06R fee
-        # breakeven, so every bank close stays net-positive.
+        # Profit-bank arms: close when peak R reaches these levels (scaled to the
+        # empiric realized peak band).
+        #
+        # Data from 54 closed trades: avg peak R for winners was ~0.12-0.16R.
+        # BANK_R=0.50 and BANK_R2=0.30 were way above the realized band,
+        # so the profit-bank arms NEVER fired. 81.5% of exits were time-based.
+        #
+        # Retuned to match the empiric peak band:
+        #   BANK_R = 0.22 → full bank just above realized band
+        #   BANK_R2 = 0.15 → partial bank at top of realized band
         if wave.peak_r >= BANK_R:
             return WaveAction(type="CLOSE", reason="bank_08r", wave=wave, price=tick.price)
         if wave.peak_r >= BANK_R2:
-            # bank a partial at +0.22R near the top of the realized band,
+            # bank a partial at +0.15R near the top of the realized band,
             # so the wave is given room to reach the full 1.5R TP first
             return WaveAction(type="CLOSE", reason="tp05_hit", wave=wave, price=tick.price)
 

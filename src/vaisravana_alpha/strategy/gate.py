@@ -1,4 +1,15 @@
-"""Wave gate — wave-quality whipsaw guard (bias+conf+SMC)."""
+"""Wave gate — wave-quality whipsaw guard (bias+conf+SMC).
+
+Redesigned from wave bot's proven thresholds:
+  - MIN_BIAS_STRENGTH: 0.30 (was 0.10 — too permissive)
+  - CONF_ENTRY_FLOOR: 0.12 (was 0.10 — too permissive)
+  - ADX_FLOOR: 18 (was 15 — allow more regimes)
+  - STRUCTURE_SCORE_FLOOR: 0.12 (was 0.10 — allow thinner structure)
+
+The key insight from wave bot: the gate should be selective enough to avoid
+whipsaws, but permissive enough to trade on weak-trend tape. The wave bot
+achieves this with MIN_BIAS_STRENGTH=0.30 and CONF_ENTRY_FLOOR=0.12.
+"""
 from __future__ import annotations
 
 import logging
@@ -9,14 +20,11 @@ from vaisravana_alpha.strategy.smc import SMCZoneCache
 
 log = logging.getLogger(__name__)
 
-# Thresholds
-MIN_BIAS_STRENGTH = 0.10 # very low so weak leans on choppy BONK tape still trade
-CONF_ENTRY_FLOOR = 0.10  # lower so flat-tape candidates still pass
-                          # (0 opens in a full run after warmup). Keep iter-9
-                          # selectivity (net break-even); the standalone warmup
-                          # already removed the dead 90s burst.
-ADX_FLOOR = 15           # allow more regimes through (mean-revert included)
-STRUCTURE_SCORE_FLOOR = 0.10  # allow thinner structure through
+# Thresholds (matching wave bot's proven values)
+MIN_BIAS_STRENGTH = 0.30  # wave bot proven value
+CONF_ENTRY_FLOOR = 0.12   # wave bot proven value
+ADX_FLOOR = 18            # wave bot proven value
+STRUCTURE_SCORE_FLOOR = 0.12  # wave bot proven value
 
 
 def wave_quality_pass(

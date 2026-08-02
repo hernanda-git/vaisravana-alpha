@@ -1,20 +1,23 @@
-"""UniverseRanker — rank all Binance futures pairs by strength/weakness.
+"""UniverseRanker — rank all Binance futures pairs by mean-reversion + momentum signals.
 
-Fetches every active futures contract, scores it on:
-  1. 24h price change (momentum)
-  2. Volume delta (buying vs selling pressure)
-  3. CVD divergence (cumulative volume delta trend)
-  4. Relative strength vs BTC (outperformance)
+Instead of pure momentum chasing (which buys tops and sells bottoms), this ranker
+combines:
+  1. RSI (mean-reversion): oversold pairs are BUY candidates, overbought are SELL
+  2. VWAP distance (mean-reversion): distance from VWAP indicates overextension
+  3. CVD divergence (order flow): smart money accumulation/distribution
+  4. Volume delta (order flow): net buying vs selling pressure
+  5. Relative strength vs BTC (regime): outperformance/underperformance
 
-Returns ranked lists: top N strongest, bottom N weakest.
-Both bots use this to SELECT pairs AND DIRECTION instead of guessing.
+The key insight: when millions of bots chase momentum, the best edge is mean-reversion.
+We rank pairs by how EXTREMELY overextended they are — the most oversold get BUY scores,
+the most overbought get SELL scores. This is the opposite of momentum chasing.
 
 Usage:
     from universe_ranker import UniverseRanker
     r = UniverseRanker()
     r.update()  # fetch + score
-    strongest = r.strongest(5)   # [(pair, score), ...]
-    weakest = r.weakest(5)       # [(pair, score), ...]
+    strongest = r.strongest(5)   # most oversold → BUY candidates
+    weakest = r.weakest(5)       # most overbought → SELL candidates
 """
 from __future__ import annotations
 
@@ -40,10 +43,11 @@ REFRESH_INTERVAL_S = 60  # re-fetch every 60s
 class PairScore:
     """Single pair's strength score and components."""
     pair: str
-    total_score: float       # -1.0 (weakest) to +1.0 (strongest)
-    price_change_24h: float  # raw 24h % change
+    total_score: float       # -1.0 (weakest/overbought) to +1.0 (strongest/oversold)
+    rsi_14: float            # RSI 14-period (0-100)
+    vwap_distance: float     # distance from VWAP as fraction
+    cvd_divergence: float    # CVD trend (-1..+1)
     volume_delta: float      # -1.0 to +1.0
-    cvd_trend: float         # -1.0 to +1.0
     btc_relative: float      # pair_return - btc_return
     volume_24h: float        # raw volume in quote currency
     price: float             # current price
@@ -51,7 +55,7 @@ class PairScore:
 
 
 class UniverseRanker:
-    """Fetches all Binance futures pairs, scores them, ranks strongest/weakest."""
+    """Fetches all Binance futures pairs, scores them by mean-reversion + momentum."""
 
     def __init__(
         self,
@@ -68,7 +72,7 @@ class UniverseRanker:
         self.bottom_n = bottom_n
 
         # State
-        self.all_pairs: list[str] = []
+        self.all_pairs: list[str] = self._load_persisted_pairs()
         self.scores: dict[str, PairScore] = {}
         self.ranked: list[PairScore] = []
         self.last_update: float = 0.0
@@ -88,7 +92,7 @@ class UniverseRanker:
         # 2. Score each pair
         self.scores = await self._score_all_pairs(self.all_pairs)
 
-        # 3. Rank
+        # 3. Rank — strongest = most oversold (BUY candidates), weakest = most overbought (SELL)
         self.ranked = sorted(self.scores.values(), key=lambda s: s.total_score, reverse=True)
 
         # 4. Persist
@@ -102,12 +106,12 @@ class UniverseRanker:
         )
 
     def strongest(self, n: int | None = None) -> list[PairScore]:
-        """Return top N strongest pairs."""
+        """Return top N strongest pairs (most oversold → BUY candidates)."""
         n = n or self.top_n
         return self.ranked[:n]
 
     def weakest(self, n: int | None = None) -> list[PairScore]:
-        """Return bottom N weakest pairs."""
+        """Return bottom N weakest pairs (most overbought → SELL candidates)."""
         n = n or self.bottom_n
         return self.ranked[-n:]
 
@@ -127,6 +131,36 @@ class UniverseRanker:
 
     # ── Data fetching ──────────────────────────────────────────────────────
 
+    def _fetch_active_pairs_sync(self) -> list[str]:
+        """Sync version of _fetch_active_pairs for use at boot before event loop."""
+        import urllib.request
+        import json
+        try:
+            req = urllib.request.Request(
+                f"{self.rest_base}/fapi/v1/exchangeInfo",
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+
+            pairs = []
+            for s in data.get("symbols", []):
+                if s.get("status") != "TRADING":
+                    continue
+                ct = s.get("contract_type")
+                if ct and ct != "PERPETUAL":
+                    continue
+                symbol = s["symbol"]
+                if not symbol.endswith("USDT"):
+                    continue
+                if any(f in symbol for f in ("UPUSDT", "DOWNUSDT", "HALFUSDT")):
+                    continue
+                pairs.append(symbol)
+            return pairs
+        except Exception as e:
+            log.error("Failed to fetch active pairs from Binance API: %s", e)
+            return []
+
     async def _fetch_active_pairs(self) -> list[str]:
         """Fetch all active Binance futures symbols."""
         try:
@@ -141,15 +175,12 @@ class UniverseRanker:
             for s in data.get("symbols", []):
                 if s.get("status") != "TRADING":
                     continue
-                # Accept PERPETUAL or None (spot/other USDT pairs)
                 ct = s.get("contract_type")
                 if ct and ct != "PERPETUAL":
                     continue
                 symbol = s["symbol"]
-                # Only USDT-margined pairs for simplicity
                 if not symbol.endswith("USDT"):
                     continue
-                # Filter out low-quality pairs
                 if any(f in symbol for f in ("UPUSDT", "DOWNUSDT", "HALFUSDT")):
                     continue
                 pairs.append(symbol)
@@ -163,7 +194,6 @@ class UniverseRanker:
 
         except Exception as exc:
             log.error("universe_ranker: failed to fetch pairs: %s", exc)
-            # Fallback: try persisted list
             return self._load_persisted_pairs()
 
     def _load_persisted_pairs(self) -> list[str]:
@@ -176,7 +206,7 @@ class UniverseRanker:
             return []
 
     async def _score_all_pairs(self, pairs: list[str]) -> dict[str, PairScore]:
-        """Score all pairs in parallel."""
+        """Score all pairs in parallel batches."""
         # Batch fetch 24hr tickers
         tickers = await self._fetch_24hr_tickers(pairs)
 
@@ -193,35 +223,41 @@ class UniverseRanker:
             if not ticker:
                 continue
 
-            # 1. Price change 24h
-            price_change = float(ticker.get("priceChangePercent", 0.0)) / 100.0
+            # 1. RSI 14-period (mean-reversion signal)
+            rsi = self._compute_rsi_from_ticker(ticker)
 
-            # 2. Volume delta proxy (bidQty vs askQty from bookTicker)
+            # 2. VWAP distance (mean-reversion signal)
+            vwap_dist = self._compute_vwap_distance(ticker, book)
+
+            # 3. CVD divergence (order flow)
+            cvd_div = self._compute_cvd_divergence(ticker, book)
+
+            # 4. Volume delta (order flow)
             vol_delta = self._compute_volume_delta(book)
 
-            # 3. CVD trend proxy (volume-weighted price direction)
-            cvd_trend = self._compute_cvd_trend(ticker, book)
-
-            # 4. Relative strength vs BTC
+            # 5. Relative strength vs BTC
             btc_change = btc_score.get("price_change", 0.0)
+            price_change = float(ticker.get("priceChangePercent", 0.0)) / 100.0
             btc_rel = price_change - btc_change
 
-            # Composite score (normalized to -1..+1)
-            total = self._composite_score(price_change, vol_delta, cvd_trend, btc_rel)
+            # Composite score — MEAN-REVERSION PRIMARY, MOMENTUM SECONDARY
+            total = self._composite_score(rsi, vwap_dist, cvd_div, vol_delta, btc_rel)
 
             scores[pair] = PairScore(
                 pair=pair,
                 total_score=total,
-                price_change_24h=price_change,
+                rsi_14=rsi,
+                vwap_distance=vwap_dist,
+                cvd_divergence=cvd_div,
                 volume_delta=vol_delta,
-                cvd_trend=cvd_trend,
                 btc_relative=btc_rel,
                 volume_24h=ticker.get("quoteVolume", 0.0),
                 price=ticker.get("lastPrice", 0.0),
                 components={
-                    "price_change": round(price_change, 4),
+                    "rsi": round(rsi, 4),
+                    "vwap_distance": round(vwap_dist, 4),
+                    "cvd_divergence": round(cvd_div, 4),
                     "volume_delta": round(vol_delta, 4),
-                    "cvd_trend": round(cvd_trend, 4),
                     "btc_relative": round(btc_rel, 4),
                 },
             )
@@ -233,15 +269,17 @@ class UniverseRanker:
         tickers = {}
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                # Binance allows comma-separated symbols
-                symbols = ",".join(pairs[:50])  # batch limit
-                resp = await client.get(
-                    f"{self.rest_base}/fapi/v1/ticker/24hr",
-                    params={"symbols": symbols},
-                )
-                resp.raise_for_status()
-                for t in resp.json():
-                    tickers[t["symbol"]] = t
+                # Binance allows comma-separated symbols (up to 50 at a time)
+                for i in range(0, len(pairs), 50):
+                    batch = pairs[i:i+50]
+                    symbols = ",".join(batch)
+                    resp = await client.get(
+                        f"{self.rest_base}/fapi/v1/ticker/24hr",
+                        params={"symbols": symbols},
+                    )
+                    resp.raise_for_status()
+                    for t in resp.json():
+                        tickers[t["symbol"]] = t
         except Exception as exc:
             log.warning("universe_ranker: ticker fetch failed: %s", exc)
         return tickers
@@ -251,14 +289,16 @@ class UniverseRanker:
         books = {}
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                symbols = ",".join(pairs[:50])
-                resp = await client.get(
-                    f"{self.rest_base}/fapi/v1/ticker/bookTicker",
-                    params={"symbols": symbols},
-                )
-                resp.raise_for_status()
-                for b in resp.json():
-                    books[b["symbol"]] = b
+                for i in range(0, len(pairs), 50):
+                    batch = pairs[i:i+50]
+                    symbols = ",".join(batch)
+                    resp = await client.get(
+                        f"{self.rest_base}/fapi/v1/ticker/bookTicker",
+                        params={"symbols": symbols},
+                    )
+                    resp.raise_for_status()
+                    for b in resp.json():
+                        books[b["symbol"]] = b
         except Exception as exc:
             log.warning("universe_ranker: bookTicker fetch failed: %s", exc)
         return books
@@ -273,7 +313,6 @@ class UniverseRanker:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                # When querying a single symbol, Binance returns a dict, not a list
                 if isinstance(data, list):
                     data = data[0]
                 pc = data.get("priceChangePercent", "0")
@@ -288,11 +327,94 @@ class UniverseRanker:
 
     # ── Scoring ────────────────────────────────────────────────────────────
 
-    def _compute_volume_delta(self, book: dict | None) -> float:
-        """Compute volume delta from order book bid/ask quantities.
+    def _compute_rsi_from_ticker(self, ticker: dict | None, period: int = 14) -> float:
+        """Compute RSI proxy from 24hr ticker data.
 
-        Higher bidQty relative to askQty = buying pressure = bullish.
+        Uses price change over 24h as a proxy for RSI direction.
+        If price dropped significantly → oversold → positive score (BUY)
+        If price rose significantly → overbought → negative score (SELL)
+
+        This is a simplified RSI proxy since we don't have kline data in the
+        24hr ticker. The direction is correct even if the magnitude is approximate.
         """
+        if not ticker:
+            return 0.5  # neutral
+
+        price_change = float(ticker.get("priceChangePercent", 0.0)) / 100.0
+
+        # Normalize: price_change of -5% → +1.0 (oversold), +5% → -1.0 (overbought)
+        # Cap at ±5% to avoid outliers
+        pc_norm = max(-0.05, min(0.05, price_change))
+        # Scale to -1..+1: negative change = positive score (oversold = BUY)
+        rsi_proxy = -pc_norm * 20.0  # -5% → +1.0, +5% → -1.0
+        return max(-1.0, min(1.0, rsi_proxy))
+
+    def _compute_vwap_distance(self, ticker: dict | None, book: dict | None) -> float:
+        """Compute distance from VWAP as a mean-reversion signal.
+
+        Uses 24h volume-weighted price as a proxy for VWAP.
+        If current price is far above VWAP → overbought → negative score
+        If current price is far below VWAP → oversold → positive score
+        """
+        if not ticker:
+            return 0.0
+
+        last_price = float(ticker.get("lastPrice", 0))
+        quote_volume = float(ticker.get("quoteVolume", 0))
+        base_volume = float(ticker.get("volume", 0))
+
+        if quote_volume == 0 or base_volume == 0:
+            return 0.0
+
+        # VWAP proxy: quoteVolume / baseVolume = volume-weighted average price
+        vwap_proxy = quote_volume / base_volume
+
+        if vwap_proxy == 0:
+            return 0.0
+
+        # Distance as fraction
+        dist = (last_price - vwap_proxy) / vwap_proxy
+
+        # Normalize: positive dist = price above VWAP = overbought = negative score
+        # Clamp at ±2% to avoid outliers
+        dist = max(-0.02, min(0.02, dist))
+        # Scale to -1..+1
+        return max(-1.0, min(1.0, -dist * 50))  # negative sign: above VWAP = negative score
+
+    def _compute_cvd_divergence(self, ticker: dict | None, book: dict | None) -> float:
+        """Compute CVD divergence proxy.
+
+        If price is rising but volume is declining → bearish divergence (SELL)
+        If price is falling but volume is increasing → bullish divergence (BUY)
+        """
+        if not ticker or not book:
+            return 0.0
+
+        price_change = float(ticker.get("priceChangePercent", 0.0)) / 100.0
+        volume = float(ticker.get("quoteVolume", 0.0))
+
+        bid_qty = float(book.get("bidQty", 0.0))
+        ask_qty = float(book.get("askQty", 0.0))
+        total = bid_qty + ask_qty
+
+        if total == 0:
+            return 0.0
+
+        # Book pressure: more bid size = buying pressure
+        book_pressure = (bid_qty - ask_qty) / total
+
+        # CVD divergence: if price is up but book pressure is down → bearish divergence
+        # If price is down but book pressure is up → bullish divergence
+        # Normalize price change to -1..+1 (cap at ±5%)
+        pc_norm = max(-1.0, min(1.0, price_change * 10))
+
+        # Divergence = book_pressure - price_change (positive = bullish divergence)
+        divergence = book_pressure - pc_norm
+
+        return max(-1.0, min(1.0, divergence))
+
+    def _compute_volume_delta(self, book: dict | None) -> float:
+        """Compute volume delta from order book bid/ask quantities."""
         if not book:
             return 0.0
         bid_qty = float(book.get("bidQty", 0.0))
@@ -300,59 +422,35 @@ class UniverseRanker:
         total = bid_qty + ask_qty
         if total == 0:
             return 0.0
-        # Normalize to -1..+1
         return max(-1.0, min(1.0, (bid_qty - ask_qty) / total))
-
-    def _compute_cvd_trend(self, ticker: dict | None, book: dict | None) -> float:
-        """Compute CVD trend proxy.
-
-        Uses 24h volume + price change direction + book pressure.
-        If price is rising AND volume is heavy → strong bullish CVD.
-        If price is falling AND volume is heavy → strong bearish CVD.
-        """
-        if not ticker:
-            return 0.0
-
-        price_change = float(ticker.get("priceChangePercent", 0.0)) / 100.0
-        volume = float(ticker.get("quoteVolume", 0.0))
-
-        # Normalize volume to a 0..1 scale (log scale to handle outliers)
-        vol_norm = min(1.0, volume / 1e9)  # 1B USDT = max
-
-        # CVD trend: price direction weighted by volume
-        # Positive = buying pressure dominating
-        # Negative = selling pressure dominating
-        cvd = price_change * (1.0 + vol_norm)
-
-        # Normalize to -1..+1
-        return max(-1.0, min(1.0, cvd * 10))  # scale factor
 
     def _composite_score(
         self,
-        price_change: float,
+        rsi: float,
+        vwap_dist: float,
+        cvd_div: float,
         vol_delta: float,
-        cvd_trend: float,
-        btc_relative: float,
+        btc_rel: float,
     ) -> float:
         """Compute composite strength score (-1.0 to +1.0).
 
-        Weights:
-          - price_change_24h: 0.30 (momentum)
-          - volume_delta: 0.20 (order flow)
-          - cvd_trend: 0.25 (cumulative volume delta)
-          - btc_relative: 0.25 (relative strength)
-        """
-        # Normalize price_change to -1..+1 (cap at ±5% to avoid outliers)
-        pc_norm = max(-1.0, min(1.0, price_change * 10))
+        MEAN-REVERSION PRIMARY (70%):
+          - RSI: 30% — oversold = BUY, overbought = SELL
+          - VWAP distance: 20% — below VWAP = BUY, above = SELL
+          - CVD divergence: 20% — bullish divergence = BUY
 
+        MOMENTUM SECONDARY (30%):
+          - Volume delta: 15% — net buying = bullish
+          - BTC relative: 15% — outperformance = bullish
+        """
         score = (
-            0.30 * pc_norm
-            + 0.20 * vol_delta
-            + 0.25 * cvd_trend
-            + 0.25 * btc_relative
+            0.30 * rsi           # mean-reversion: oversold = strong BUY
+            + 0.20 * vwap_dist   # mean-reversion: below VWAP = BUY
+            + 0.20 * cvd_div     # mean-reversion: bullish divergence = BUY
+            + 0.15 * vol_delta   # momentum: net buying = bullish
+            + 0.15 * btc_rel     # momentum: outperformance = bullish
         )
 
-        # Final clamp
         return max(-1.0, min(1.0, score))
 
     # ── Persistence ────────────────────────────────────────────────────────
