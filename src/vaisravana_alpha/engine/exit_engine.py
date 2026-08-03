@@ -686,8 +686,8 @@ class ExitEngine:
         if size == 0 or entry_price == 0:
             return 0.0
 
-        # Close fee: 4bps taker
-        close_fee = notional * 0.0004
+        # Close fee: 5bps taker (Binance VIP0)
+        close_fee = notional * 0.0005
 
         if side == "long":
             gross = (tick.price - entry_price) * size

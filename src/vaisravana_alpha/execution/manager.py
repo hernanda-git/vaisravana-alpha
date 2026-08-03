@@ -10,7 +10,7 @@ from typing import Optional
 from vaisravana_alpha.core.models import Wave, WaveState, BiasReading, Candidate, Tick, TickContext
 from vaisravana_alpha.strategy.smc import SMCZoneCache
 from vaisravana_alpha.strategy.bias import size_from_confidence
-from vaisravana_alpha.storage.db import log_wave_open, log_wave_close, append_telemetry
+from vaisravana_alpha.storage.db import log_wave_open, log_wave_close, append_telemetry, log_trade
 from vaisravana_alpha.strategy.structure import detect_structure
 from vaisravana_alpha.strategy.indicators import atr_pct as _atr_pct
 
@@ -44,7 +44,7 @@ BREAKEVEN_FLOOR_R = 0.20     # once peak_r >= this, SL moves to breakeven (tight
 LOSS_CUT_R = 0.50            # hard loss-cut — give trades room, wider stop
 FLIP_STRENGTH = 0.20         # bias strength needed to confirm a flip
 PARTIAL_FRAC = 0.25          # fraction to trim on stall
-MAX_WAVE_AGE_S = int(os.getenv("VAISRAVANA_MAX_WAVE_AGE_S", "300"))  # force-close a wave after 5m if nothing else exits it (anti-stuck; prod floor)
+MAX_WAVE_AGE_S = int(os.getenv("VAISRAVANA_MAX_WAVE_AGE_S", "600"))  # force-close a wave after 10m if nothing else exits it (anti-stuck; prod floor)
 
 
 # ── Actions ───────────────────────────────────────────────────────────────────
@@ -427,7 +427,7 @@ class WaveManager:
             # Check if still -EV after fees at current price
             notional = wave.notional or (wave.size * wave.entry_price) if wave.entry_price else 0.0
             if notional > 0:
-                close_fee = notional * 0.0004  # taker close fee
+                close_fee = notional * 0.0005  # taker close fee (Binance VIP0 = 0.05%)
                 risk_per_r = notional * (abs(wave.entry_price - wave.anchor) / wave.entry_price) if wave.entry_price else 0.0
                 fee_floor = close_fee / risk_per_r if risk_per_r > 0 else 0.0
                 # If live R is below the fee floor, close immediately (cannot recover)
@@ -498,6 +498,11 @@ class WaveManager:
                 log_wave_close(self.conn, wave, econ=econ)
             except Exception as e:
                 log.warning("log_wave_close failed: %s", e)
+            # Persist to trades table for restart-safe analytics
+            try:
+                log_trade(self.conn, wave, econ)
+            except Exception as e:
+                log.warning("log_trade failed: %s", e)
 
         # Feed realized net PnL to the adaptive throttle
         try:

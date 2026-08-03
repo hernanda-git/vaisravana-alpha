@@ -206,7 +206,11 @@ class UniverseRanker:
             return []
 
     async def _score_all_pairs(self, pairs: list[str]) -> dict[str, PairScore]:
-        """Score all pairs in parallel batches."""
+        """Score all pairs in parallel batches.
+
+        Uses percentile-rank normalization across the universe so components
+        have meaningful differentiation instead of clamping to ±1.0.
+        """
         # Batch fetch 24hr tickers
         tickers = await self._fetch_24hr_tickers(pairs)
 
@@ -216,49 +220,81 @@ class UniverseRanker:
         # Fetch BTC for relative strength
         btc_score = await self._fetch_btc_score()
 
-        scores = {}
+        # ── Phase 1: compute raw scores ──────────────────────────────
+        raw_scores: dict[str, dict] = {}
         for pair in pairs:
             ticker = tickers.get(pair)
             book = books.get(pair)
             if not ticker:
                 continue
 
-            # 1. RSI 14-period (mean-reversion signal)
             rsi = self._compute_rsi_from_ticker(ticker)
-
-            # 2. VWAP distance (mean-reversion signal)
             vwap_dist = self._compute_vwap_distance(ticker, book)
-
-            # 3. CVD divergence (order flow)
             cvd_div = self._compute_cvd_divergence(ticker, book)
-
-            # 4. Volume delta (order flow)
             vol_delta = self._compute_volume_delta(book)
 
-            # 5. Relative strength vs BTC
             btc_change = btc_score.get("price_change", 0.0)
             price_change = float(ticker.get("priceChangePercent", 0.0)) / 100.0
             btc_rel = price_change - btc_change
 
-            # Composite score — MEAN-REVERSION PRIMARY, MOMENTUM SECONDARY
-            total = self._composite_score(rsi, vwap_dist, cvd_div, vol_delta, btc_rel)
+            raw_scores[pair] = {
+                "rsi": rsi,
+                "vwap_distance": vwap_dist,
+                "cvd_divergence": cvd_div,
+                "volume_delta": vol_delta,
+                "btc_relative": btc_rel,
+                "volume_24h": ticker.get("quoteVolume", 0.0),
+                "price": ticker.get("lastPrice", 0.0),
+            }
+
+        # ── Phase 2: percentile-rank normalization ───────────────────
+        # Instead of absolute thresholds that clamp everything to ±1.0,
+        # rank each component across the universe and normalize to [-1, 1].
+        # This gives meaningful differentiation: most oversold = +1.0,
+        # most overbought = -1.0, everything in between is proportional.
+        if len(raw_scores) > 2:
+            for comp in ("rsi", "vwap_distance", "cvd_divergence", "volume_delta", "btc_relative"):
+                values = [(p, raw_scores[p][comp]) for p in raw_scores]
+                values.sort(key=lambda x: x[1])
+                n = len(values)
+                for rank_idx, (pair, _) in enumerate(values):
+                    # Percentile rank: 0 = lowest, 1 = highest
+                    pct = rank_idx / max(n - 1, 1)
+                    # Map to [-1, +1]: lowest → -1.0, highest → +1.0
+                    raw_scores[pair][f"{comp}_norm"] = 2.0 * pct - 1.0
+        else:
+            # Fallback: use raw values if too few pairs
+            for pair in raw_scores:
+                for comp in ("rsi", "vwap_distance", "cvd_divergence", "volume_delta", "btc_relative"):
+                    raw_scores[pair][f"{comp}_norm"] = raw_scores[pair][comp]
+
+        # ── Phase 3: composite score using normalized values ─────────
+        scores = {}
+        for pair, rs in raw_scores.items():
+            rsi_n = rs["rsi_norm"]
+            vwap_n = rs["vwap_distance_norm"]
+            cvd_n = rs["cvd_divergence_norm"]
+            vol_n = rs["volume_delta_norm"]
+            btc_n = rs["btc_relative_norm"]
+
+            total = self._composite_score(rsi_n, vwap_n, cvd_n, vol_n, btc_n)
 
             scores[pair] = PairScore(
                 pair=pair,
                 total_score=total,
-                rsi_14=rsi,
-                vwap_distance=vwap_dist,
-                cvd_divergence=cvd_div,
-                volume_delta=vol_delta,
-                btc_relative=btc_rel,
-                volume_24h=ticker.get("quoteVolume", 0.0),
-                price=ticker.get("lastPrice", 0.0),
+                rsi_14=rsi_n,
+                vwap_distance=vwap_n,
+                cvd_divergence=cvd_n,
+                volume_delta=vol_n,
+                btc_relative=btc_n,
+                volume_24h=rs["volume_24h"],
+                price=rs["price"],
                 components={
-                    "rsi": round(rsi, 4),
-                    "vwap_distance": round(vwap_dist, 4),
-                    "cvd_divergence": round(cvd_div, 4),
-                    "volume_delta": round(vol_delta, 4),
-                    "btc_relative": round(btc_rel, 4),
+                    "rsi": round(rsi_n, 4),
+                    "vwap_distance": round(vwap_n, 4),
+                    "cvd_divergence": round(cvd_n, 4),
+                    "volume_delta": round(vol_n, 4),
+                    "btc_relative": round(btc_n, 4),
                 },
             )
 

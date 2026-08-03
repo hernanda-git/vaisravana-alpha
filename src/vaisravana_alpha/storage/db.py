@@ -60,6 +60,24 @@ CREATE TABLE IF NOT EXISTS smc_zones (
 );
 CREATE INDEX IF NOT EXISTS idx_smc_lookup
     ON smc_zones(pair, tf, type);
+
+-- Trades table: persists trade data across restarts (wave_log only has structure, not economics)
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wave_id TEXT UNIQUE,
+    pair TEXT, tf TEXT, side TEXT,
+    entry_price REAL, exit_price REAL,
+    quantity REAL, leverage INT,
+    pnl REAL, fee REAL,
+    confidence REAL,
+    close_reason TEXT,
+    opened_at TEXT, closed_at TEXT,
+    FOREIGN KEY(wave_id) REFERENCES wave_log(wave_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trades_pair
+    ON trades(pair, side);
+CREATE INDEX IF NOT EXISTS idx_trades_closed
+    ON trades(closed_at);
 """
 
 
@@ -212,3 +230,25 @@ def get_recent_closed(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
         "ORDER BY closed_ts DESC LIMIT ?", (limit,)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── trades table writers ──────────────────────────────────────────────────────
+
+
+def log_trade(conn: sqlite3.Connection, wave, econ: dict) -> None:
+    """Insert a trade row for persistence across restarts."""
+    conn.execute("""
+        INSERT OR REPLACE INTO trades
+            (wave_id, pair, tf, side, entry_price, exit_price,
+             quantity, leverage, pnl, fee, confidence, close_reason,
+             opened_at, closed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        wave.wave_id, wave.pair, wave.tf, wave.side,
+        wave.entry_price, econ.get("exit_price", 0.0),
+        wave.size, wave.leverage,
+        econ.get("net", 0.0), econ.get("close_fee", 0.0),
+        wave.confidence, wave.close_reason,
+        str(wave.opened_ts), str(wave.closed_ts or time.time()),
+    ))
+    conn.commit()
