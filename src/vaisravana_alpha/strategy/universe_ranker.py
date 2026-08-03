@@ -155,6 +155,11 @@ class UniverseRanker:
                     continue
                 if any(f in symbol for f in ("UPUSDT", "DOWNUSDT", "HALFUSDT")):
                     continue
+                # Exclude non-ASCII symbols (e.g., 龙虾USDT) — they cause encoding errors
+                try:
+                    symbol.encode("ascii")
+                except UnicodeEncodeError:
+                    continue
                 pairs.append(symbol)
             return pairs
         except Exception as e:
@@ -182,6 +187,11 @@ class UniverseRanker:
                 if not symbol.endswith("USDT"):
                     continue
                 if any(f in symbol for f in ("UPUSDT", "DOWNUSDT", "HALFUSDT")):
+                    continue
+                # Exclude non-ASCII symbols (e.g., 龙虾USDT) — they cause encoding errors
+                try:
+                    symbol.encode("ascii")
+                except UnicodeEncodeError:
                     continue
                 pairs.append(symbol)
 
