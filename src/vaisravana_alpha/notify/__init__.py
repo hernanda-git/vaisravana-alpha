@@ -9,6 +9,7 @@ delivery.
 from vaisravana_alpha.notify.cards import (
     halt_card,
     performance_card,
+    trades_card,
     positions_card,
     startup_card,
     status_card,
@@ -29,6 +30,7 @@ __all__ = [
     "status_card",
     "positions_card",
     "performance_card",
+    "trades_card",
     "wave_open_card",
     "wave_close_card",
     "halt_card",

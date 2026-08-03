@@ -1,0 +1,39 @@
+# Telegram operations
+
+## Alpha bot
+
+The Alpha bot is `@vaisravana_alpha_bot`.
+
+## Registered commands
+
+- `/alpha_status`
+- `/alpha_performance`
+- `/alpha_positions`
+- `/alpha_trades`
+- `/alpha_universe`
+- `/alpha_stop`
+- `/alpha_resume`
+- `/alpha_help`
+
+## Command behavior
+
+- Status reports process liveness and feed state.
+- Performance reads persistent closed-trade history from SQLite.
+- Positions reads current in-memory exposure and wallet snapshot.
+- Trades reads recent persistent closed-trade history.
+- Universe reports current ranked symbols.
+- Stop and resume change owner control state.
+
+## Verification
+
+```bash
+TOKEN=$(docker exec bots-vaisravana-alpha env | awk -F= '/TELEGRAM_BOT_TOKEN/{print $2}')
+curl -s "https://api.telegram.org/bot${TOKEN}/getMe"
+curl -s "https://api.telegram.org/bot${TOKEN}/getMyCommands"
+```
+
+Do not print or commit the token. If commands are stale, rebuild the Alpha container so startup registration runs again, then verify `getMyCommands`.
+
+## Reporting rule
+
+Telegram numbers must be derived from the same persistent database query used by offline reports. A message saying no closed trades is a defect when the database contains completed rows.

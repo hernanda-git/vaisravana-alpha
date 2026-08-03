@@ -23,7 +23,7 @@ class KillSwitch:
     the midnight roll or an owner command.
     """
 
-    def __init__(self, daily_loss_limit_pct: float = 0.5) -> None:
+    def __init__(self, daily_loss_limit_pct: float = 2.0) -> None:
         self.daily_loss_limit_pct = daily_loss_limit_pct
         self._tripped = False
         self._trip_reason = ""

@@ -95,6 +95,8 @@ class Wave:
 
     close_reason: Optional[str] = None  # WAVE_BREAK | KILL | PARTIAL_CHAIN
     _open_fee: float = 0.0          # fee charged at open (for close-card round-trip tally)
+    open_components: dict = field(default_factory=dict)  # bias component breakdown at entry
+    last_components: dict = field(default_factory=dict)  # freshest bias component breakdown
 
 
 # ── Bias / Confidence ────────────────────────────────────────────────────────

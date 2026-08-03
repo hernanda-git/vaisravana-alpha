@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 # Thresholds (matching wave bot's proven values)
 MIN_BIAS_STRENGTH = 0.30  # wave bot proven value
-CONF_ENTRY_FLOOR = 0.12   # wave bot proven value
+CONF_ENTRY_FLOOR = 0.45   # confidence floor for entry (was 0.12 — too many weak entries at 0.37/0.41)
 ADX_FLOOR = 18            # wave bot proven value
 STRUCTURE_SCORE_FLOOR = 0.12  # wave bot proven value
 
@@ -41,10 +41,11 @@ def wave_quality_pass(
     All AND conditions — single fail rejects.
     Returns (pass, reason).
     """
-    # 1. Bias direction agrees with intended side
-    if side == "BUY" and bias.direction != "bullish":
+    # 1. Counter-trade bias direction: BUY fades the dump (needs bearish bias),
+    # SELL fades the rally (needs bullish bias). Opposite of trend-following.
+    if side == "BUY" and bias.direction != "bearish":
         return False, f"bias={bias.direction} rejects BUY"
-    if side == "SELL" and bias.direction != "bearish":
+    if side == "SELL" and bias.direction != "bullish":
         return False, f"bias={bias.direction} rejects SELL"
 
     # 2. Bias strength floor

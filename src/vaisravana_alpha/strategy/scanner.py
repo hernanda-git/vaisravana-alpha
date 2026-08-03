@@ -36,10 +36,11 @@ def scan(
     regime_label is passed through to the Candidate so the manager
     can adapt TP width (wider in trends, tighter in ranges).
     """
-    # Quick pre-check: bias direction must agree
-    if side == "BUY" and bias.direction != "bullish":
+    # Counter-trade (mean-reversion): BUY fades the dump (needs bearish bias),
+    # SELL fades the rally (needs bullish bias). Opposite of trend-following.
+    if side == "BUY" and bias.direction != "bearish":
         return None
-    if side == "SELL" and bias.direction != "bearish":
+    if side == "SELL" and bias.direction != "bullish":
         return None
 
     # Derive structure

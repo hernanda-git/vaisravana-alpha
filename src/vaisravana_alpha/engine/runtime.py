@@ -605,7 +605,14 @@ class AlphaEngine:
     def _refresh_shared_state(self) -> None:
         """Publish state the command handlers read."""
         self.state.open_waves = list(self.manager.waves.values())
-        self.state.closed_waves = list(getattr(self.manager, "closed_today", []))
+        # Performance must survive restarts.  The old implementation read an
+        # optional in-memory ``closed_today`` list that the manager never
+        # populated, so /alpha_performance incorrectly reported zero trades.
+        try:
+            self.state.closed_waves = storage.get_recent_closed(self.conn, 200)
+        except Exception as exc:
+            log.warning("closed-trade query failed: %s", exc)
+            self.state.closed_waves = []
 
     def _clear_stale_open_waves(self) -> None:
         """Clear open waves from DB that won't survive a container restart.
@@ -655,6 +662,8 @@ class AlphaEngine:
             self._notify(cards.positions_card(self.state.open_waves, self.wallet))
         elif base in ("/performance", "/surf"):
             self._notify(cards.performance_card(self.state.closed_waves, self.wallet))
+        elif base == "/trades":
+            self._notify(cards.trades_card(self.state.closed_waves, self.wallet))
         elif base == "/status":
             self._notify(cards.status_card(
                 version=_version(),

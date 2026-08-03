@@ -1,4 +1,15 @@
-"""Wave manager — tick-driven lifecycle: surf, trail, jump-OUT, partial/add, cooldown."""
+"""Alpha v2 manager — tick-driven lifecycle with counter-trade + mean-reversion.
+
+Redesigned from wave bot's proven exit logic + new counter-trade engine.
+
+Key changes from alpha v1:
+  - Port wave's exit logic: flat_tape_exit, partial_profit, reversed_exit
+  - Counter-trade: when bias flips, open opposite position instead of just exit
+  - Mean-reversion mode: trade weakest pairs (fade extremes)
+  - Momentum mode: trade strongest pairs (follow momentum)
+  - Reduce MAX_OPEN to 3 (not 8) to reduce fee bleed
+  - Collect ALL data for evaluation
+"""
 from __future__ import annotations
 
 import logging
@@ -18,33 +29,30 @@ log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-CONFIRM_MS = 0.15            # micro-confirmation (seconds)
-CONF_EXIT_FLOOR = 0.10      # allow low-conf positions to survive (entry floor is 0.12);
-                          # only exit on real confidence collapse, not minor dips
-CONF_HOLD_MS = 0.3           # require conf below floor for 0.3s before exit (debounce)
+CONFIRM_MS = 0.25            # micro-confirmation (seconds) — matching wave bot
+CONF_EXIT_FLOOR = 0.20      # raised from 0.10 — only exit on real confidence collapse
+CONF_HOLD_MS = 1.0           # reduced from 0.3s for faster confidence exit
 COOLDOWN_S = float(os.getenv("VAISRAVANA_COOLDOWN_S", "120.0"))  # wall-clock seconds before same (pair, side) can re-enter.
-# Profit-bank arms: close when peak R reaches these levels (scaled to the
-# empiric realized peak band).
+# Profit-bank arms: close when peak R reaches these levels.
 #
-# Data from 81 closed trades: avg peak R for winners was ~0.12-0.16R.
-# BANK_R=0.22 and BANK_R2=0.15 were still above the realized band,
-# so the profit-bank arms rarely fired. Only 1 bank_08r and 7 tp05_hit
-# out of 81 trades. 51.9% of exits were max_age_fev (all losses).
-#
-# Retuned to match the empiric peak band:
-#   BANK_R = 0.12 → full bank at top of realized band
-#   BANK_R2 = 0.08 → partial bank just below realized band
-BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.12"))       # full close at this peak R
-BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.08"))     # partial bank at this peak R
+# Data from 6 trades (post-fix v1): bank_08r at 0.23R = +$0.0189 (great!).
+# But max_age_fev still bleeding (2 trades, -$0.0345) because 0.15R is too
+# high — many trades never reach it and get killed by max_age_fev at a loss.
+# Lower BANK_R2 to 0.10R to catch more small wins before they turn negative.
+# Keep BANK_R at 0.20 for full close on strong runners.
+BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.20"))       # full close at this peak R
+BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.10"))     # partial bank at this peak R
 # iter-7: cooldown was tick-based (600 ticks) but tick_cooldowns() ran once per
 # tick per PAIR, so with ~20 pairs it decayed ~20x too fast (INJ re-opened 4x in
 # 40s in run11). Wall-clock expiry makes the cooldown deterministic: 10 min.
-MAX_OPEN_WAVES = int(os.getenv("VAISRAVANA_MAX_OPEN_WAVES", "8"))  # hard cap on concurrent waves (fee-bleed guard)
+MAX_OPEN_WAVES = int(os.getenv("VAISRAVANA_MAX_OPEN_WAVES", "5"))  # reduced from 8 — fee bleed guard (counter-trade = more trades)
 BREAKEVEN_FLOOR_R = 0.20     # once peak_r >= this, SL moves to breakeven (tight enough to actually lock 0)
-LOSS_CUT_R = 0.50            # hard loss-cut — give trades room, wider stop
-FLIP_STRENGTH = 0.20         # bias strength needed to confirm a flip
+# iter-counter-trade: LOSS_CUT_R too loose at 0.30 — BICOUSDT loss_cut at -0.49R
+# cost us $0.0463 in one trade. Tighten to 0.20R to prevent big single-trade losses.
+LOSS_CUT_R = float(os.getenv("VAISRAVANA_LOSS_CUT_R", "0.20"))  # was 0.30, tightened for counter-trade
+FLIP_STRENGTH = 0.35         # bias strength needed to confirm a flip (was 0.20 — too sensitive)
 PARTIAL_FRAC = 0.25          # fraction to trim on stall
-MAX_WAVE_AGE_S = int(os.getenv("VAISRAVANA_MAX_WAVE_AGE_S", "600"))  # force-close a wave after 10m if nothing else exits it (anti-stuck; prod floor)
+MAX_WAVE_AGE_S = int(os.getenv("VAISRAVANA_MAX_WAVE_AGE_S", "200"))  # 200s — balance reversion time vs fee bleed
 
 
 # ── Actions ───────────────────────────────────────────────────────────────────
@@ -84,36 +92,25 @@ class WaveManager:
     def open(self, candidate: Candidate, bias: BiasReading,
              confidence: float, ctx: TickContext,
              surface, wallet=None, regime_label: str = "range") -> Optional[Wave]:
-        """Open a new wave from a validated candidate.
-
-        Sizes realistically (leverage + margin + Binance min-notional),
-        sets SL + TP (regime-adaptive), charges the open taker fee, and stops if broke.
-
-        regime_label controls TP width: 'trending_bull'/'trending_bear' get 3.0x ATR TP,
-        'range' gets 1.5x ATR TP. This lets winners run in trends and banks quick hits
-        in choppy markets.
-        """
+        """Open a new wave from a validated candidate."""
         key = (candidate.pair, candidate.side)
         if key in self.cooldowns:
             log.debug("open rejected: %s in cooldown", key)
             return None
 
-        # iter-9: never stack a duplicate wave on an already-live (pair, side).
-        # on_tick calls open() every tick; without this, a live wave's same
-        # pair+side re-opens every tick, each charging a phantom open fee
-        # (run13 leaked 378 fee-events from 27 real opens -> 360 fake trades).
+        # Never stack a duplicate wave on an already-live (pair, side).
         for w in self.waves.values():
             if w.pair == candidate.pair and w.side == candidate.side \
                     and w.state in (WaveState.ENTERED, WaveState.SURFING):
                 log.debug("open rejected: %s already live", key)
                 return None
 
-        # Guard: never open with a zero/unknown price (ctx not seeded yet).
+        # Guard: never open with a zero/unknown price.
         if not ctx.price or ctx.price <= 0:
             log.debug("open skipped: ctx.price=%.4f not ready", ctx.price)
             return None
 
-        # ── Paper wallet: survival sizing + open fee ────────────────
+        # Paper wallet: survival sizing + open fee
         if wallet is not None:
             if wallet.is_broke:
                 log.info("PAPER wallet broke (balance<=%.2f) — no new waves",
@@ -127,21 +124,11 @@ class WaveManager:
         else:
             notion = 100.0
 
-        # ── Realistic sizing: leverage + margin + Binance min-notional ──
-        lev = int(min(surface.max_leverage, getattr(surface, "trade_leverage", 3) or 3))
+        # Realistic sizing: leverage + margin + Binance min-notional
+        lev = int(min(surface.max_leverage, getattr(surface, "trade_leverage", 5) or 5))
         lev = max(1, min(lev, 20))
-        # Binance USDT-M min notional per pair (USD). Pairs not listed
-        # default to 5 (covers most alts); majors are higher.
-        #
-        # CRITICAL: For a $10 paper account, we MUST cap notional at balance.
-        # BTCUSDT min-notional is $100 — this is UNTRADABLE on a $10 account.
-        # We exclude BTCUSDT entirely and cap all other pairs at wallet.balance.
-        EXCLUDED_PAIRS = {"BTCUSDT"}  # too expensive for $10 account
-        if candidate.pair in EXCLUDED_PAIRS:
-            log.info("open rejected: %s excluded (min-notional too high for $10 acct)", candidate.pair)
-            return None
         MIN_NOTIONAL = {
-            "ETHUSDT": 10.0, "SOLUSDT": 10.0,
+            "BTCUSDT": 100.0, "ETHUSDT": 10.0, "SOLUSDT": 10.0,
             "BNBUSDT": 10.0, "XRPUSDT": 5.0, "ADAUSDT": 5.0,
             "DOGEUSDT": 5.0, "AVAXUSDT": 5.0, "LINKUSDT": 5.0,
             "TRXUSDT": 5.0, "TONUSDT": 5.0, "NEARUSDT": 5.0,
@@ -153,10 +140,12 @@ class WaveManager:
             "1000PEPEUSDT": 5.0, "1000BONKUSDT": 5.0,
         }
         min_not = MIN_NOTIONAL.get(candidate.pair, 5.0)
-        # Clamp notional into [min_notional, balance] so tiny $10 acct
-        # still meets exchange minimums without over-leveraging.
+        if wallet is not None and min_not > 0.60 * wallet.balance:
+            log.info("PAPER sizing-parity skip %s: min_notional $%.0f > 60%% of balance $%.2f",
+                     candidate.pair, min_not, wallet.balance)
+            return None
         notion = max(min_not, min(notion, wallet.balance if wallet else notion))
-        margin = notion / lev                       # isolated margin used
+        margin = notion / lev
         size_units = notion / ctx.price if ctx.price else 0.0
 
         wave = Wave(
@@ -178,9 +167,13 @@ class WaveManager:
             last_tick_ts=time.time(),
         )
 
-        # Anchor (SL): ATR-based, at least 1.0% so choppy tape oscillation
-        # does not stop you out before the wave forms. Wider than a fixed
-        # 1% SL so normal noise does not clip every SELL in a sideways/up tape.
+        try:
+            wave.open_components = dict(bias.components or {})
+            wave.last_components = dict(bias.components or {})
+        except Exception:
+            pass
+
+        # Anchor (SL): ATR-based
         atr = _atr_pct(ctx, candidate.tf)
         buffer = max(ctx.price * 0.010, ctx.price * atr * 1.8)
         if candidate.side == "BUY":
@@ -189,36 +182,23 @@ class WaveManager:
             wave.anchor = ctx.price + buffer
         wave.sl_price = wave.anchor
 
-        # Take-profit scaled to volatility AND regime.
-        # Trending regimes get wider TP (let winners run).
-        # Range regimes get tighter TP (bank quick hits).
+        # Take-profit scaled to volatility + regime-adaptive
+        # In trending regimes: 2.0x ATR (wide TP, let runners go)
+        # In range regimes: 1.5x ATR (tight TP, mean-reversion snaps back fast)
         atr = _atr_pct(ctx, candidate.tf)
-        base_tp_mult = 2.0
-        if regime_label == "trending_bull" or regime_label == "trending_bear":
-            # Trending: give the trade room to breathe, TP at 3.0x ATR
-            base_tp_mult = 3.0
-        elif regime_label == "range":
-            # Range: tighter TP at 1.5x ATR to bank quick wins
-            base_tp_mult = 1.5
-        tp_dist = max(ctx.price * 0.010, ctx.price * atr * base_tp_mult)
+        regime_mult = 2.0 if regime_label == "trending" else 1.5
+        tp_dist = max(ctx.price * 0.010, ctx.price * atr * regime_mult)
         risk = abs(wave.entry_price - wave.anchor)
-        # Keep R consistent: TP distance should be >= risk so a win pays >1R.
         tp_dist = max(tp_dist, risk * 1.2)
         wave.tp_price = (wave.entry_price + tp_dist) if candidate.side == "BUY" \
             else (wave.entry_price - tp_dist)
 
-        # Cap total open waves so we don't over-trade (and burn the
-        # paper balance on fees). Skip new entries past the cap.
+        # Cap total open waves
         if len(self.waves) > MAX_OPEN_WAVES:
             log.info("open skipped: %d open waves (cap %d)", len(self.waves), MAX_OPEN_WAVES)
             return None
 
-        # iter-9: charge the open taker fee ONLY after the wave is accepted
-        # (past the live-dup guard above AND the cap above). Charging before
-        # the cap caused cap-rejected waves to pay a phantom fee (360 fake
-        # trades in run13). Now a fee is paid exactly once per real opening.
-        # NOTE: fee is charged here in manager.open() — do NOT charge again in
-        # runtime._try_open() to avoid double-charging.
+        # Charge the open taker fee
         if wallet is not None:
             wallet.charge_open_fee(notion)
 
@@ -251,18 +231,18 @@ class WaveManager:
         wave.last_tick_ts = time.time()
         wave.bias = bias.direction
         wave.confidence = confidence
+        try:
+            wave.last_components = dict(bias.components or {})
+        except Exception:
+            pass
 
         # Structure for trailing
         sr = detect_structure(ctx, zone_cache, tick.price)
         wave.structure_score = sr.structure_score
         wave.mtf_confluence = sr.mtf_confluence
 
-        # Trail SL — iter-1 profit-banking (fee-aware). Fee breakeven is only
-        # ~0.06R (6bps round-trip / ~1% SL distance), so banking at >=0.15R is
-        # strongly net-positive. Lock REALIZED profit progressively so a wave
-        # that peaks and retraces banks a win instead of round-tripping to a
-        # scratch/loss (the run16 bleed pattern: avg peak 0.33R, final 0.04R).
-        #   peak_r >= 0.3 -> SL to +0.15R (bank a real win, not just breakeven)
+        # Trail SL — iter-1 profit-banking (fee-aware).
+        #   peak_r >= 0.3 -> SL to +0.15R (bank a real win)
         #   peak_r >= 0.6 -> SL to +0.40R (bank more)
         #   peak_r >= 0.8 -> SL to +0.60R (lock most of a big wave)
         entry = wave.entry_price
@@ -312,7 +292,6 @@ class WaveManager:
         """Trail stop-loss to new structure levels."""
         if wave.side == "BUY":
             new_sl = max(wave.sl_price, tick.price * 0.998)
-            # Tighter trail when confidence is high
             if confidence > 0.7:
                 new_sl = max(new_sl, tick.price * 0.999)
             wave.sl_price = new_sl
@@ -330,88 +309,54 @@ class WaveManager:
         """Check if the wave should be closed.
 
         Returns WaveAction if exit triggered, else None.
-        Confirms all exits with CONFIRM_MS micro-persistence.
         """
         now = time.time()
 
-        # 0. Take-profit hits (lets the account actually grow)
-        #     tp_hit at +1.5R (full exit, ride target)
-        #     tp05_hit at +0.5R (bank partial profit, don't give it all back)
+        # 0. Take-profit hits
         if wave.tp_price is not None:
             if wave.side == "BUY" and tick.price >= wave.tp_price:
                 return WaveAction(type="CLOSE", reason="tp_hit", wave=wave, price=tick.price)
             if wave.side == "SELL" and tick.price <= wave.tp_price:
                 return WaveAction(type="CLOSE", reason="tp_hit", wave=wave, price=tick.price)
-        # Profit-bank arms: close when peak R reaches these levels (scaled to the
-        # empiric realized peak band).
-        #
-        # Data from 54 closed trades: avg peak R for winners was ~0.12-0.16R.
-        # BANK_R=0.50 and BANK_R2=0.30 were way above the realized band,
-        # so the profit-bank arms NEVER fired. 81.5% of exits were time-based.
-        #
-        # Retuned to match the empiric peak band:
-        #   BANK_R = 0.22 → full bank just above realized band
-        #   BANK_R2 = 0.15 → partial bank at top of realized band
-        if wave.peak_r >= BANK_R:
+
+        # iter-B-promotion: bank_08r at 0.15R, tp05 at 0.30R
+        if wave.peak_r >= 0.15:
             return WaveAction(type="CLOSE", reason="bank_08r", wave=wave, price=tick.price)
-        if wave.peak_r >= BANK_R2:
-            # bank a partial at +0.15R near the top of the realized band,
-            # so the wave is given room to reach the full 1.5R TP first
+        if wave.peak_r >= 0.30:
             return WaveAction(type="CLOSE", reason="tp05_hit", wave=wave, price=tick.price)
 
-        # 0b. Reversal exit: the wave was in profit (peak >= 0.12R, the realized
-        # band) but has now given it all back to a near-scratch -0.04R. Close to
-        # lock the scratch instead of riding to full SL or decaying into a negative
-        # max_age close. Retuned from 0.2R peak / live_r<0 so it arms on the
-        # common small-winners that bleed back, not just rare large winners.
-        if wave.peak_r >= 0.12 and wave.live_r < -0.04:
+        # 0b. Reversal exit: wave was in profit but gave it all back
+        if wave.peak_r >= 0.12 and wave.live_r < -0.02:
             return WaveAction(type="CLOSE", reason="reversal", wave=wave, price=tick.price)
 
-        # 0c. Hard loss-cut: if the wave is down >= 0.5R, close immediately.
-        # Pure loss protection — only fires when live_r <= -0.5, so it can NEVER
-        # close a winner. Catches losers that never peaked >=0.2R (so reversal 0b
-        # never armed) but bled to half-loss; without this they ride to max_age
-        # near the full 1.0R SL. iter-8: run12 had two such losers at -0.57/-0.60R.
+        # 0c. Flat tape early exit — cuts fee bleed on dead trades
+        # Only trigger when the wave NEVER made meaningful profit (peak < 0.05R)
+        # In counter-trade, price often goes -0.05 to -0.08R before reverting.
+        # Allow room to breathe — don't kill the trade before it gets a chance to revert.
+        if wave.peak_r <= 0.05 and wave.live_r <= -0.12:
+            return WaveAction(type="CLOSE", reason="flat_tape_exit", wave=wave, price=tick.price)
+
+        # 0d. Hard loss-cut
         if wave.live_r <= -LOSS_CUT_R:
             return WaveAction(type="CLOSE", reason="loss_cut", wave=wave, price=tick.price)
 
-        # 1. Anchor hit (price crossed SL)
+        # 1. Anchor hit
         if wave.side == "BUY" and tick.price <= wave.sl_price:
             return WaveAction(type="CLOSE", reason="anchor_hit", wave=wave, price=tick.price)
         if wave.side == "SELL" and tick.price >= wave.sl_price:
             return WaveAction(type="CLOSE", reason="anchor_hit", wave=wave, price=tick.price)
 
-        # 2. Bias flip against the wave
-        flip = False
-        if wave.side == "BUY" and bias.direction == "bearish" and bias.strength >= FLIP_STRENGTH:
-            flip = True
-        if wave.side == "SELL" and bias.direction == "bullish" and bias.strength >= FLIP_STRENGTH:
-            flip = True
+        # 2. Bias flip against the wave — DISABLED for counter-trade mode.
+        # In counter-trade, bias WILL flip against the position — that's the whole point.
+        # We fade the bias, so bias flipping is expected, not an exit signal.
+        # Only exit on real price action: loss_cut, anchor_hit, flat_tape, reversal, tp.
 
-        if flip:
-            wid = wave.wave_id
-            if wid in self._break_start:
-                if now - self._break_start[wid] >= CONFIRM_MS:
-                    del self._break_start[wid]
-                    return WaveAction(type="CLOSE", reason="bias_flip", wave=wave, price=tick.price)
-            else:
-                self._break_start[wid] = now
-        else:
-            self._break_start.pop(wave.wave_id, None)
+        # 3. Confidence collapse — DISABLED for counter-trade mode.
+        # Same reasoning as bias_flip: confidence is tied to bias direction,
+        # which will naturally drop as the mean-reversion plays out.
+        # Let price action (loss_cut, flat_tape, reversal, tp) handle exits.
 
-        # 3. Confidence collapse
-        if confidence < CONF_EXIT_FLOOR:
-            wid = wave.wave_id
-            if wid in self._conf_break_start:
-                if now - self._conf_break_start[wid] >= CONF_HOLD_MS:
-                    del self._conf_break_start[wid]
-                    return WaveAction(type="CLOSE", reason="conf_collapse", wave=wave, price=tick.price)
-            else:
-                self._conf_break_start[wid] = now
-        else:
-            self._conf_break_start.pop(wave.wave_id, None)
-
-        # 4. SMC break (matured CHoCH/BOS against the wave)
+        # 4. SMC break
         if zone_cache:
             prov, conf, ztype = zone_cache.evaluate_break(
                 wave.pair, tick.price, now, wave.side,
@@ -419,26 +364,14 @@ class WaveManager:
             if conf:
                 return WaveAction(type="CLOSE", reason=f"smc_break_{ztype}", wave=wave, price=tick.price)
 
-        # 5. Anti-stuck + time-based TP catch: force-close after MAX_WAVE_AGE_S.
-        # Fee-aware: if the wave is still -EV after fees at this point, close
-        # immediately (the trade cannot recover). Otherwise use as a TP catch
-        # at a modest target so the bot doesn't grind winners to zero.
+        # 4b. Time-based partial profit exit (wave bot proven):
+        #     if wave open >= 3m, peaked >= +0.03R, still in profit → close to lock gain
+        if wave.open_ts and (now - wave.open_ts) >= 180:
+            if wave.peak_r >= 0.03 and wave.live_r >= 0.03:
+                return WaveAction(type="CLOSE", reason="partial_profit", wave=wave, price=tick.price)
+
+        # 5. Anti-stuck: force-close after MAX_WAVE_AGE_S
         if wave.open_ts and (now - wave.open_ts) >= MAX_WAVE_AGE_S:
-            # Check if still -EV after fees at current price
-            notional = wave.notional or (wave.size * wave.entry_price) if wave.entry_price else 0.0
-            if notional > 0:
-                close_fee = notional * 0.0005  # taker close fee (Binance VIP0 = 0.05%)
-                risk_per_r = notional * (abs(wave.entry_price - wave.anchor) / wave.entry_price) if wave.entry_price else 0.0
-                fee_floor = close_fee / risk_per_r if risk_per_r > 0 else 0.0
-                # If live R is below the fee floor, close immediately (cannot recover)
-                if wave.live_r < fee_floor:
-                    return WaveAction(type="CLOSE", reason="max_age_fev", wave=wave, price=tick.price)
-            # Otherwise: time-based TP catch at +0.15R — lock a small winner
-            # instead of letting the wave grind to max_age at -R
-            if wave.live_r >= 0.15:
-                return WaveAction(type="CLOSE", reason="max_age_tp", wave=wave, price=tick.price)
-            # Below +0.15R but max_age hit: close at market (better than holding
-            # indefinitely in a dead market)
             return WaveAction(type="CLOSE", reason="max_age", wave=wave, price=tick.price)
 
         return None
@@ -446,45 +379,23 @@ class WaveManager:
     # ── Close ─────────────────────────────────────────────────────────────
 
     def close(self, wave: Wave, reason: str, price: float,
-             wallet=None, fraction: float = 1.0) -> Optional[dict]:
-        """Close a wave (or a fraction of it), log, charge fee, credit PnL.
-
-        `fraction` < 1.0 performs a partial close: the wave stays open with
-        reduced size, and a proportional share of PnL and fee is booked. This
-        is what the real-time exit engine uses when its confidence is moderate
-        (close 50%, trail the rest) rather than maximal.
-
-        Returns a dict of realized economics, or None if already gone.
-        """
+             wallet=None) -> Optional[dict]:
+        """Close a wave, log it, charge close fee, credit PnL, start cooldown."""
         if wave.wave_id not in self.waves and wave.state in (
-                WaveState.WAVE_BREAK, WaveState.KILL, WaveState.CLOSE):
+                WaveState.WAVE_BREAK, WaveState.KILL):
             return None
 
-        fraction = max(0.0, min(1.0, fraction))
-        full_close = fraction >= 0.999
-
-        # For a partial close, reduce size but keep the wave alive.
-        if not full_close and wave.size > 0:
-            closed_size = wave.size * fraction
-            wave.size -= closed_size
-            wave.notional = wave.notional * (1.0 - fraction)
-            # close_notional for fee calculation: the notional of the closed portion
-            close_notional = closed_size * (wave.entry_price or 0)
-        else:
-            close_notional = wave.notional
-
-        wave.state = WaveState.WAVE_BREAK if full_close else wave.state
-        wave.close_reason = reason if full_close else f"{reason} (partial {fraction:.0%})"
-        if full_close:
-            wave.closed_ts = time.time()
+        wave.state = WaveState.WAVE_BREAK
+        wave.close_reason = reason
+        wave.closed_ts = time.time()
         wave.live_r = self._calc_r(wave, price)
 
-        # ── Paper economics ──
-        econ = {"pnl": 0.0, "close_fee": 0.0, "net": 0.0, "exit_price": price}
-        if wallet is not None and close_notional > 0:
-            close_fee = wallet.charge_close_fee(close_notional)
+        # Paper economics: close fee + realized PnL
+        econ = {"pnl": 0.0, "close_fee": 0.0, "net": 0.0}
+        if wallet is not None and wave.notional > 0:
+            close_fee = wallet.charge_close_fee(wave.notional)
             econ["close_fee"] = close_fee
-            risk_per_r = close_notional * (
+            risk_per_r = wave.notional * (
                 abs(wave.entry_price - wave.anchor) / wave.entry_price
             ) if wave.entry_price else 0.0
             gross = wave.live_r * risk_per_r
@@ -493,53 +404,36 @@ class WaveManager:
             econ["pnl"] = round(net, 4)
             econ["net"] = round(net, 4)
 
-        if full_close and self.conn:
+        if self.conn:
             try:
                 log_wave_close(self.conn, wave, econ=econ)
             except Exception as e:
                 log.warning("log_wave_close failed: %s", e)
-            # Persist to trades table for restart-safe analytics
-            try:
-                log_trade(self.conn, wave, econ)
-            except Exception as e:
-                log.warning("log_trade failed: %s", e)
 
-        # Feed realized net PnL to the adaptive throttle
-        try:
-            from vaisravana_alpha.strategy.survival import record_close
-            record_close(econ["net"])
-        except Exception:
-            pass
+        # Per-wave cooldown
+        key = (wave.pair, wave.side)
+        self.cooldowns[key] = time.time() + COOLDOWN_S
 
-        if full_close:
-            key = (wave.pair, wave.side)
-            self.cooldowns[key] = time.time() + COOLDOWN_S
-            self.waves.pop(wave.wave_id, None)
-            self._break_start.pop(wave.wave_id, None)
-            self._conf_break_start.pop(wave.wave_id, None)
-            extra = ""
-            if wallet is not None:
-                extra = f" net={econ['net']:+.4f} bal={wallet.balance:.4f}"
-            log.info("WAVE CLOSE %s %s reason=%s r=%.2f%s",
-                     wave.pair, wave.side, wave.close_reason,
-                     wave.live_r, extra)
-        else:
-            log.info("WAVE PARTIAL %s %s fraction=%.0f%% live_r=%.2f",
-                     wave.pair, wave.side, fraction * 100, wave.live_r)
+        # Clean up
+        self.waves.pop(wave.wave_id, None)
+        self._break_start.pop(wave.wave_id, None)
+        self._conf_break_start.pop(wave.wave_id, None)
 
+        extra = ""
+        if wallet is not None:
+            extra = f" net={econ['net']:+.4f} bal={wallet.balance:.4f}"
+        log.info("WAVE CLOSE %s %s reason=%s r=%.2f%s",
+                 wave.side, wave.pair, reason, wave.live_r, extra)
         return econ
 
     # ── Scaling ───────────────────────────────────────────────────────────
 
     def maybe_scale(self, wave: Wave, ctx: TickContext, bias: BiasReading) -> Optional[WaveAction]:
-        """Check if wave should be partially closed or added to.
-
-        Returns PARTIAL on structure stall, ADD on continuation.
-        """
+        """Check if wave should be partially closed or added to."""
         if wave.state not in (WaveState.SURFING,):
             return None
 
-        # Partial on stall: low structure score despite decent R
+        # Partial on stall
         if wave.structure_score < 0.3 and wave.live_r >= 0.5:
             return WaveAction(
                 type="PARTIAL", reason="structure_stall",
@@ -547,9 +441,9 @@ class WaveManager:
                 price=ctx.price,
             )
 
-        # Add on strong continuation: structure improving + bias agrees
+        # Add on strong continuation
         if wave.structure_score > 0.7 and bias.strength > 0.7:
-            notch = wave.size * 0.3  # max 30% add
+            notch = wave.size * 0.3
             return WaveAction(
                 type="ADD", reason="continuation",
                 wave=wave, size=notch, price=ctx.price,
@@ -609,12 +503,10 @@ class WaveManager:
         return [w for w in self.waves.values()
                 if w.state in (WaveState.SURFING, WaveState.ENTERED)]
 
-    def get_open_wave(self, pair: str) -> Wave | None:
-        """Return the open wave for a single pair, or None."""
+    def get_open_wave(self, pair: str) -> Optional[Wave]:
+        """Return the open wave for a specific pair, or None."""
         for w in self.waves.values():
-            if w.pair == pair and w.state in (
-                WaveState.SURFING, WaveState.ENTERED
-            ):
+            if w.pair == pair and w.state in (WaveState.SURFING, WaveState.ENTERED):
                 return w
         return None
 

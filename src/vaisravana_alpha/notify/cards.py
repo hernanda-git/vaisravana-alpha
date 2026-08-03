@@ -142,9 +142,14 @@ def performance_card(closed: list, wallet=None) -> str:
     if not closed:
         return "📊 <b>No closed trades yet.</b>"
 
-    r_values = [w.live_r for w in closed if w.live_r != 0]
-    pnl = [getattr(w, "pnl_usd", 0.0) or 0.0 for w in closed]
-    fees = sum(getattr(w, "fees_usd", 0.0) or 0.0 for w in closed)
+    def value(item, attr, default=0.0):
+        return item.get(attr, default) if isinstance(item, dict) else getattr(item, attr, default)
+
+    r_values = [float(value(w, "final_r", value(w, "live_r", 0.0)) or 0.0) for w in closed]
+    pnl = [float(value(w, "pnl_usd", 0.0) or 0.0) for w in closed]
+    # wave_log stores close fee.  Include the open fee recorded in trades when
+    # available, so the command reports net economics rather than gross PnL.
+    fees = sum(float(value(w, "fees_usd", 0.0) or 0.0) for w in closed)
     wins = sum(1 for r in r_values if r > 0)
     total = len(r_values)
     median_r = sorted(r_values)[total // 2] if r_values else 0.0
@@ -162,6 +167,26 @@ def performance_card(closed: list, wallet=None) -> str:
     ]
     if wallet is not None:
         lines.append(f"<code>  Balance  : {wallet.snapshot()['balance']:.4f}$</code>")
+    return "\n".join(lines)
+
+
+def trades_card(closed: list, wallet=None) -> str:
+    """Recent persistent trades for /alpha_trades."""
+    if not closed:
+        return "📒 <b>No closed trades recorded.</b>"
+    lines = [f"📒 <b>Recent trades ({min(len(closed), 12)})</b>"]
+    for item in closed[:12]:
+        def v(name, default=""):
+            return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+        pnl = float(v("pnl_usd", 0.0) or 0.0)
+        icon = "🟢" if pnl >= 0 else "🔴"
+        lines.append(
+            f"{icon} <code>{html_escape(str(v('side')))} {html_escape(str(v('pair')))}</code> "
+            f"<code>{html_escape(str(v('close_reason', 'n/a')))}</code> "
+            f"<code>{pnl:+.4f}$</code>"
+        )
+    if wallet is not None:
+        lines += _balance_footer(wallet)
     return "\n".join(lines)
 
 
