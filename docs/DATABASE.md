@@ -6,6 +6,8 @@
 - `wave_telemetry`: time-series observations while a wave is open.
 - `smc_zones`: detected structure and zone state.
 - `trades`: durable trade economics for compatibility and historical queries.
+- `strategy/relative_value.py`: paper-only pair-signal calculations are not
+  persisted as completed trades until coordinated execution is implemented.
 
 ## Required future fields
 

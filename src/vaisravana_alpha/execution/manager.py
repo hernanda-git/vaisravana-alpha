@@ -194,13 +194,17 @@ class WaveManager:
             else (wave.entry_price - tp_dist)
 
         # Cap total open waves
-        if len(self.waves) > MAX_OPEN_WAVES:
+        if len(self.waves) >= MAX_OPEN_WAVES:
             log.info("open skipped: %d open waves (cap %d)", len(self.waves), MAX_OPEN_WAVES)
             return None
 
-        # Charge the open taker fee
+        # Charge and persist the open fee. The fee is part of net economics.
         if wallet is not None:
-            wallet.charge_open_fee(notion)
+            wave._open_fee = wallet.charge_open_fee(notion)
+        risk_per_r = notion * (abs(wave.entry_price - wave.anchor) / wave.entry_price) if wave.entry_price else 0.0
+        wave.expected_gross = risk_per_r * 0.15
+        wave.expected_cost = notion * ((wallet.open_fee_rate + wallet.close_fee_rate) if wallet else 0.0006)
+        wave.expected_net = wave.expected_gross - wave.expected_cost
 
         wave.state = WaveState.SURFING
         self.waves[wave.wave_id] = wave
@@ -391,7 +395,7 @@ class WaveManager:
         wave.live_r = self._calc_r(wave, price)
 
         # Paper economics: close fee + realized PnL
-        econ = {"pnl": 0.0, "close_fee": 0.0, "net": 0.0}
+        econ = {"pnl": 0.0, "gross": 0.0, "open_fee": getattr(wave, "_open_fee", 0.0), "close_fee": 0.0, "net": 0.0, "slippage": 0.0, "funding": 0.0}
         if wallet is not None and wave.notional > 0:
             close_fee = wallet.charge_close_fee(wave.notional)
             econ["close_fee"] = close_fee
@@ -399,14 +403,19 @@ class WaveManager:
                 abs(wave.entry_price - wave.anchor) / wave.entry_price
             ) if wave.entry_price else 0.0
             gross = wave.live_r * risk_per_r
-            net = gross - close_fee
-            wallet.credit_pnl(net)
+            # The open fee was already deducted at entry. Credit only the
+            # close-time cashflow here so wallet balance is not double-charged.
+            cashflow_net = gross - close_fee
+            net = gross - econ["open_fee"] - close_fee
+            econ["gross"] = round(gross, 4)
+            wallet.credit_pnl(cashflow_net)
             econ["pnl"] = round(net, 4)
             econ["net"] = round(net, 4)
 
         if self.conn:
             try:
                 log_wave_close(self.conn, wave, econ=econ)
+                log_trade(self.conn, wave, econ)
             except Exception as e:
                 log.warning("log_wave_close failed: %s", e)
 

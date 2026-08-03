@@ -5,10 +5,10 @@ Preserve aggressive multi-pair trading while making net profitability, not win r
 
 ## High-level plan
 1. Preserve the current Alpha baseline and persistent trade history.
-2. Correct reporting so Telegram and SQLite agree on closed trades, gross PnL, fees, and net PnL.
+2. Correct reporting so Telegram and SQLite agree on closed trades, gross PnL, fees, and net PnL. The fee-aware persistence migration is now implemented.
 3. Keep aggressive universe-ranked single-leg counter-trading.
-4. Add fee-aware expected-edge telemetry without creating a blanket no-trade gate.
-5. Add paired relative-value trading as a separate strategy mode.
+4. Add fee-aware expected-edge telemetry without creating a blanket no-trade gate. The schema and single-leg estimates are now implemented.
+5. Add paired relative-value research as a separate strategy mode. The paper-only signal engine is now implemented; coordinated execution remains gated by synchronized data and leg tracking.
 6. Evaluate single-leg, paired, and future basis modes independently.
 7. Deploy only paper mode until each mode demonstrates positive net expectancy over a meaningful sample.
 

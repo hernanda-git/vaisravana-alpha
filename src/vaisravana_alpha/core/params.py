@@ -100,7 +100,7 @@ class RiskLimits(BaseModel):
     """Hard capital bounds. The R:R floor is an owner mandate, not a hint."""
 
     max_leverage: int = Field(default=3, ge=1, le=20)
-    max_open_waves: int = Field(default=8, ge=1, le=50)
+    max_open_waves: int = Field(default=5, ge=1, le=50)
     risk_per_trade_pct: float = Field(default=0.20, ge=0.01, le=1.0)
     daily_loss_limit_pct: float = Field(default=0.5, ge=0.1, le=5.0)
     sl_atr_mult: float = Field(default=1.0, ge=0.5, le=3.0)

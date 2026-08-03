@@ -558,18 +558,14 @@ class ExitConfidenceModel:
         """
         thresholds = self.REGIME_THRESHOLDS[regime]
 
-        # Adjust thresholds based on salvage — aggressive loss cutting
+        # Fee-aware salvage: realize profitable exits earlier, but require
+        # stronger confidence before crystallizing a losing exit. This keeps
+        # the aggressive trade engine active without converting every adverse
+        # tick into a realized loss.
         if salvage < 0:
-            # Exiting loses money: LOWER thresholds to exit FASTER
-            # This prevents the death spiral of holding losing trades
-            thresholds = {
-                k: max(0.3, v - 0.15) for k, v in thresholds.items()
-            }
+            thresholds = {k: min(0.99, v + 0.10) for k, v in thresholds.items()}
         elif salvage > 0:
-            # Exiting gains money: can be more selective
-            thresholds = {
-                k: min(0.95, v + 0.05) for k, v in thresholds.items()
-            }
+            thresholds = {k: max(0.20, v - 0.05) for k, v in thresholds.items()}
 
         if confidence >= thresholds["close_100"]:
             return ExitAction.CLOSE_100

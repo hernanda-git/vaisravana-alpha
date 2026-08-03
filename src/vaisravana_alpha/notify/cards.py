@@ -150,6 +150,7 @@ def performance_card(closed: list, wallet=None) -> str:
     # wave_log stores close fee.  Include the open fee recorded in trades when
     # available, so the command reports net economics rather than gross PnL.
     fees = sum(float(value(w, "fees_usd", 0.0) or 0.0) for w in closed)
+    gross = sum(float(value(w, "gross_pnl", 0.0) or 0.0) for w in closed)
     wins = sum(1 for r in r_values if r > 0)
     total = len(r_values)
     median_r = sorted(r_values)[total // 2] if r_values else 0.0
@@ -162,8 +163,9 @@ def performance_card(closed: list, wallet=None) -> str:
         f"({wins}/{total})</code>",
         f"<code>  Median R : {median_r:+.3f}</code>",
         f"<code>  Mean R   : {mean_r:+.3f}</code>",
-        f"<code>  Net PnL  : {sum(pnl):+.4f}$</code>",
+        f"<code>  Gross PnL: {gross:+.4f}$</code>",
         f"<code>  Fees     : -{fees:.4f}$</code>",
+        f"<code>  Net PnL  : {sum(pnl):+.4f}$</code>",
     ]
     if wallet is not None:
         lines.append(f"<code>  Balance  : {wallet.snapshot()['balance']:.4f}$</code>")

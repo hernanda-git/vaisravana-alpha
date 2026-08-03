@@ -97,6 +97,14 @@ class Wave:
     _open_fee: float = 0.0          # fee charged at open (for close-card round-trip tally)
     open_components: dict = field(default_factory=dict)  # bias component breakdown at entry
     last_components: dict = field(default_factory=dict)  # freshest bias component breakdown
+    strategy_mode: str = "single_leg_counter"
+    trade_group_id: str = ""
+    leg_id: str = ""
+    expected_gross: float = 0.0
+    expected_cost: float = 0.0
+    expected_net: float = 0.0
+    entry_rank: int = 0
+    cvd_divergence_present: bool = False
 
 
 # ── Bias / Confidence ────────────────────────────────────────────────────────

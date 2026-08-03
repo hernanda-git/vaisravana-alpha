@@ -117,7 +117,7 @@ class Settings:
 
     # -- engine pacing -----------------------------------------------------
     warmup_s: float = 90.0              # no opens until context is seeded
-    max_open_waves: int = 8
+    max_open_waves: int = 5
     max_wave_age_s: int = 900
 
     # -- exit engine -------------------------------------------------------
@@ -200,7 +200,7 @@ def load_settings() -> Settings:
         fee_close=env_float("PAPER_FEE_CLOSE", 0.0004),
         risk_pct=env_float("PAPER_RISK_PCT", 0.20),
         warmup_s=env_float("WARMUP_S", 90.0),
-        max_open_waves=env_int("MAX_OPEN_WAVES", 8),
+        max_open_waves=env_int("MAX_OPEN_WAVES", 5),
         max_wave_age_s=env_int("MAX_WAVE_AGE_S", 900),
         exit_enabled=env_bool("EXIT_ENGINE", False),
         exit_pair=env_str("EXIT_PAIR", ""),
