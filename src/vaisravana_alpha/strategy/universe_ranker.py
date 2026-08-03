@@ -207,13 +207,24 @@ class UniverseRanker:
             return self._load_persisted_pairs()
 
     def _load_persisted_pairs(self) -> list[str]:
-        """Load previously saved pair list."""
+        """Load previously saved pair list, filtering out non-ASCII symbols."""
         try:
             with open(self.pairs_file) as f:
                 data = json.load(f)
-            return data.get("pairs", [])
+            pairs = data.get("pairs", [])
+            # Filter out non-ASCII symbols (e.g., 龙虾USDT, 币安人生USDT)
+            return [p for p in pairs if self._is_ascii_pair(p)]
         except Exception:
             return []
+
+    @staticmethod
+    def _is_ascii_pair(symbol: str) -> bool:
+        """Check if a symbol is pure ASCII (no Chinese, emoji, etc.)."""
+        try:
+            symbol.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
 
     async def _score_all_pairs(self, pairs: list[str]) -> dict[str, PairScore]:
         """Score all pairs in parallel batches.
