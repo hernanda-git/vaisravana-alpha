@@ -282,13 +282,14 @@ class AlphaEngine:
         # when there are no trades to generate open/close cards.
         if now - self._last_health_notify >= 300.0:
             self._last_health_notify = now
-            delivered = self.notifier.send(cards.status_card(
-                version=_version(), uptime_s=self.state.uptime_s,
-                pairs=len(self.settings.pairs), open_n=len(self.state.open_waves),
-                feed_ok=self.state.feed_ok, ticks=self.state.ticks,
-                throttle_cap=current_cap(),
-            ))
-            log.info("telegram health notification delivered=%s", delivered)
+            if self.notifier is not None:
+                delivered = self.notifier.send(cards.status_card(
+                    version=_version(), uptime_s=self.state.uptime_s,
+                    pairs=len(self.settings.pairs), open_n=len(self.state.open_waves),
+                    feed_ok=self.state.feed_ok, ticks=self.state.ticks,
+                    throttle_cap=current_cap(),
+                ))
+                log.info("telegram health notification delivered=%s", delivered)
         if self.agentic is None or not self.run_id:
             return
         try:
