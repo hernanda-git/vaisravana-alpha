@@ -5,6 +5,10 @@ For every completed trade:
 
 `net_pnl = gross_pnl - open_fee - close_fee - slippage - funding`
 
+The wallet balance must reconcile to starting balance plus gross realized PnL
+minus all charged costs. Fee deductions occur at execution, while the final
+trade row records the same costs for evaluation.
+
 If a value is unavailable, record it as unknown and do not silently treat it as zero in evaluation.
 
 ## Required metrics

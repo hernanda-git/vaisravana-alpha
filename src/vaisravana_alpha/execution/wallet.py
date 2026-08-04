@@ -58,6 +58,7 @@ class PaperWallet:
     trades: int = 0
     fees_paid: float = 0.0
     realized_pnl: float = 0.0
+    net_realized_pnl: float = 0.0
     peak_balance: float = DEFAULT_START_BALANCE
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -93,6 +94,7 @@ class PaperWallet:
         self.trades = int(data.get("trades", 0))
         self.fees_paid = float(data.get("fees_paid", 0.0))
         self.realized_pnl = float(data.get("realized_pnl", 0.0))
+        self.net_realized_pnl = float(data.get("net_realized_pnl", self.realized_pnl - self.fees_paid))
         self.peak_balance = float(data.get("peak_balance", self.balance))
         log.info(
             "paper wallet loaded: balance=%.4f trades=%d fees=%.4f",
@@ -117,6 +119,7 @@ class PaperWallet:
                     "trades": self.trades,
                     "fees_paid": self.fees_paid,
                     "realized_pnl": self.realized_pnl,
+                    "net_realized_pnl": self.net_realized_pnl,
                     "peak_balance": self.peak_balance,
                 }, fh)
             os.replace(tmp, self.path)
@@ -166,13 +169,19 @@ class PaperWallet:
         return fee
 
     def credit_pnl(self, pnl_usd: float) -> None:
-        """Apply realized PnL. The caller has already netted out fees."""
+        """Apply gross realized price PnL; fees are charged separately."""
         with self._lock:
             self.balance += pnl_usd
             self.realized_pnl += pnl_usd
             self.peak_balance = max(self.peak_balance, self.balance)
             self._save()
         log.info("pnl %+.4f balance=%.4f", pnl_usd, self.balance)
+
+    def record_net_pnl(self, net_pnl: float) -> None:
+        """Record final net result without changing balance again."""
+        with self._lock:
+            self.net_realized_pnl += net_pnl
+            self._save()
 
     # -- reporting ---------------------------------------------------------
 
