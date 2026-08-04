@@ -23,7 +23,7 @@ Preserve the `vaisravana-alpha-data` volume. Do not delete it during ordinary re
 - container is healthy;
 - logs show feed heartbeats;
 - no repeated traceback or reconnect loop;
-- database modification time advances;
+- `alpha_heartbeat` modification time advances (health is not tied to trades);
 - Telegram `getMe` succeeds;
 - Telegram `getMyCommands` contains all Alpha commands;
 - `/alpha_status`, `/alpha_performance`, `/alpha_positions`, and `/alpha_trades` return responses.

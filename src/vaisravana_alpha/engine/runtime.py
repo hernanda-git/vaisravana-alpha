@@ -259,20 +259,32 @@ class AlphaEngine:
             log.debug("trade telemetry failed: %s", exc)
 
     def _heartbeat(self) -> None:
-        """Persist counters periodically so a crashed run still shows progress."""
-        if self.agentic is None or not self.run_id:
-            return
+        """Persist a liveness marker and agentic counters periodically.
+
+        Health must not depend on a trade or database write. A quiet but live
+        strategy is healthy; a stale heartbeat indicates the event loop stopped.
+        """
         now = time.time()
-        if now - self._last_heartbeat < 60.0:
+        if now - self._last_heartbeat < 30.0:
             return
         self._last_heartbeat = now
+        heartbeat_path = os.path.join(self.settings.data_dir, "alpha_heartbeat")
+        try:
+            tmp = heartbeat_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(f"{now:.3f} ticks={self.state.ticks} opens={self.state.opens} closes={self.state.closes}\n")
+            os.replace(tmp, heartbeat_path)
+        except Exception as exc:
+            log.debug("heartbeat file failed: %s", exc)
+        if self.agentic is None or not self.run_id:
+            return
         try:
             agentic.heartbeat_run(
                 self.agentic, self.run_id, self.state.ticks,
                 self.state.opens, self.state.closes,
             )
         except Exception as exc:
-            log.debug("heartbeat failed: %s", exc)
+            log.debug("agentic heartbeat failed: %s", exc)
 
     # -- notification helper ----------------------------------------------
 

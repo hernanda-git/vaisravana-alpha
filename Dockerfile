@@ -36,6 +36,6 @@ VOLUME ["/data"]
 # Reports unhealthy if the database has not been touched recently, which
 # catches the failure mode a process check misses: alive but not trading.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
-    CMD python -c "import os,sys,time; p=os.path.join(os.environ.get('ALPHA_DATA','/data'),'vaisravana-alpha.db'); sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 600 else 1)"
+    CMD python -c "import os,sys,time; p=os.path.join(os.environ.get('ALPHA_DATA','/data'),'alpha_heartbeat'); sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 180 else 1)"
 
 ENTRYPOINT ["python", "-m", "vaisravana_alpha"]

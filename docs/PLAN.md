@@ -12,6 +12,22 @@ Preserve aggressive multi-pair trading while making net profitability, not win r
 6. Evaluate single-leg, paired, and future basis modes independently.
 7. Deploy only paper mode until each mode demonstrates positive net expectancy over a meaningful sample.
 
+## Fresh-run evaluation snapshot
+
+The clean paper run began from a $10 wallet with an empty trading database.
+The latest observed sample contains 12 completed single-leg counter trades:
+gross PnL +$0.0405, open fees $0.0120, close fees $0.0240, and net PnL
+approximately +$0.0045. This is preliminary, not statistically conclusive.
+The largest negative contributors were flat-tape and max-age exits. The
+paired relative-value module remains signal-only and produced no trades.
+
+## Important operational fix
+
+The Docker healthcheck previously used the trading database modification time.
+A quiet but healthy strategy was therefore marked unhealthy. Runtime now writes
+an atomic `alpha_heartbeat` file every 30 seconds, and Docker health uses that
+marker with a 180-second freshness window.
+
 ## Detailed execution phases
 
 ### Phase 0: baseline
