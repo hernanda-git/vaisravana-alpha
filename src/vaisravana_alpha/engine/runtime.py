@@ -122,6 +122,7 @@ class AlphaEngine:
         self._feed: FeedMux | None = None
         self._poller: RestPoller | None = None
         self._last_heartbeat = 0.0
+        self._last_health_notify = 0.0
 
         # Real-time exit engine. Optional; only active when exit_enabled.
         self.exit_engine = None
@@ -276,6 +277,18 @@ class AlphaEngine:
             os.replace(tmp, heartbeat_path)
         except Exception as exc:
             log.debug("heartbeat file failed: %s", exc)
+        # Telegram health is a periodic push, not just a Docker healthcheck.
+        # Keep it quiet enough for a channel, but prove the bot is alive even
+        # when there are no trades to generate open/close cards.
+        if now - self._last_health_notify >= 300.0:
+            self._last_health_notify = now
+            delivered = self.notifier.send(cards.status_card(
+                version=_version(), uptime_s=self.state.uptime_s,
+                pairs=len(self.settings.pairs), open_n=len(self.state.open_waves),
+                feed_ok=self.state.feed_ok, ticks=self.state.ticks,
+                throttle_cap=current_cap(),
+            ))
+            log.info("telegram health notification delivered=%s", delivered)
         if self.agentic is None or not self.run_id:
             return
         try:
@@ -696,6 +709,13 @@ class AlphaEngine:
             self._notify(self._help_card())
         elif base == "/ping":
             self._notify("✅ <b>Alpha Telegram listener is responding.</b>")
+        elif base == "/health":
+            self._notify(cards.status_card(
+                version=_version(), uptime_s=self.state.uptime_s,
+                pairs=len(self.settings.pairs), open_n=len(self.state.open_waves),
+                feed_ok=self.state.feed_ok, ticks=self.state.ticks,
+                throttle_cap=current_cap(),
+            ))
         elif base in ("/universe", "/alpha_universe"):
             self._notify(self._universe_card())
         else:

@@ -15,10 +15,12 @@ The Alpha bot is `@vaisravana_alpha_bot`.
 - `/alpha_resume`
 - `/alpha_help`
 - `/alpha_ping`
+- `/alpha_health`
 
 ## Command behavior
 
 - Status reports process liveness and feed state.
+- Alpha also sends a health status card every five minutes, including during quiet periods with no trades.
 - Performance reads persistent closed-trade history from SQLite.
 - Positions reads current in-memory exposure and wallet snapshot.
 - Trades reads recent persistent closed-trade history.

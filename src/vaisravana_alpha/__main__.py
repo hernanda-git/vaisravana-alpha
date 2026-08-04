@@ -38,6 +38,7 @@ COMMANDS = [
     ("/alpha_resume", "Resume trading (if stopped)"),
     ("/alpha_help", "List all available commands"),
     ("/alpha_ping", "Telegram listener diagnostic"),
+    ("/alpha_health", "Send current bot health status"),
 ]
 
 
