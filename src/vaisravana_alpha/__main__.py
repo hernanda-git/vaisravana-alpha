@@ -37,6 +37,7 @@ COMMANDS = [
     ("/alpha_stop", "Graceful shutdown after current cycle"),
     ("/alpha_resume", "Resume trading (if stopped)"),
     ("/alpha_help", "List all available commands"),
+    ("/alpha_ping", "Telegram listener diagnostic"),
 ]
 
 

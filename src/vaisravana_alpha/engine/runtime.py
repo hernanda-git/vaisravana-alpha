@@ -694,6 +694,8 @@ class AlphaEngine:
             self._notify("▶️ <b>Stop flag cleared.</b> Restart to resume trading.")
         elif base == "/help":
             self._notify(self._help_card())
+        elif base == "/ping":
+            self._notify("✅ <b>Alpha Telegram listener is responding.</b>")
         elif base in ("/universe", "/alpha_universe"):
             self._notify(self._universe_card())
         else:

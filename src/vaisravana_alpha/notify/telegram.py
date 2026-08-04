@@ -194,6 +194,16 @@ class CommandListener:
                 log.debug("telegram poll error: %s", exc)
             self._stop.wait(self._poll_s)
 
+    def healthy(self) -> bool:
+        """Return whether Telegram API access and command polling are usable."""
+        try:
+            resp = self._notifier._get_client().get(
+                f"{self._notifier._base}/getMe", timeout=10,
+            )
+            return resp.status_code == 200 and bool(resp.json().get("ok"))
+        except Exception:
+            return False
+
     def _poll_once(self) -> None:
         client = self._notifier._get_client()
         try:
@@ -205,6 +215,7 @@ class CommandListener:
             log.debug("getUpdates failed: %s", exc)
             return
         if resp.status_code != 200:
+            log.warning("telegram getUpdates HTTP %s: %s", resp.status_code, resp.text[:160])
             return
         try:
             updates = resp.json().get("result", [])
@@ -220,6 +231,7 @@ class CommandListener:
             text = (msg.get("text") or "").strip()
             if not text.startswith("/"):
                 continue
+            log.info("telegram command received: %s chat=%s", text.split()[0], chat_id)
             head = text.split()[0].lower()
             target = head.split("@", 1)[1] if "@" in head else None
             if target and self._bot_username and target != self._bot_username:

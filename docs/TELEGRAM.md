@@ -14,6 +14,7 @@ The Alpha bot is `@vaisravana_alpha_bot`.
 - `/alpha_stop`
 - `/alpha_resume`
 - `/alpha_help`
+- `/alpha_ping`
 
 ## Command behavior
 
@@ -33,6 +34,11 @@ curl -s "https://api.telegram.org/bot${TOKEN}/getMyCommands"
 ```
 
 Do not print or commit the token. If commands are stale, rebuild the Alpha container so startup registration runs again, then verify `getMyCommands`.
+
+Do not manually call `getUpdates` while Alpha is running. Telegram allows only
+one long-poll consumer and returns HTTP 409 when a second consumer competes
+with Alpha's listener. Use `getMe`, `getMyCommands`, or the Telegram client for
+verification instead.
 
 ## Reporting rule
 
