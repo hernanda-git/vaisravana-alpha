@@ -337,9 +337,10 @@ class WaveManager:
         # Only trigger when the wave NEVER made meaningful profit (peak < 0.05R)
         # and is deeply in loss. In counter-trade, price often goes -0.05 to
         # -0.08R before reverting, so a shallow dip is not a dead trade.
-        # Raise the floor to -0.20R so we only kill trades that are truly
-        # dead (never profitable AND deep in loss), not just on the way down.
-        if wave.peak_r <= 0.05 and wave.live_r <= -0.20:
+        # Data showed flat_tape_exit at -0.20R was too loose (13 trades,
+        # -$0.2468): tighten to -0.12R so dead trades exit sooner at a
+        # smaller loss rather than bleeding to max_age or loss_cut.
+        if wave.peak_r <= 0.05 and wave.live_r <= -0.12:
             return WaveAction(type="CLOSE", reason="flat_tape_exit", wave=wave, price=tick.price)
 
         # 0d. Hard loss-cut
