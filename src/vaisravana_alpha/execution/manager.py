@@ -335,9 +335,11 @@ class WaveManager:
 
         # 0c. Flat tape early exit — cuts fee bleed on dead trades
         # Only trigger when the wave NEVER made meaningful profit (peak < 0.05R)
-        # In counter-trade, price often goes -0.05 to -0.08R before reverting.
-        # Allow room to breathe — don't kill the trade before it gets a chance to revert.
-        if wave.peak_r <= 0.05 and wave.live_r <= -0.12:
+        # and is deeply in loss. In counter-trade, price often goes -0.05 to
+        # -0.08R before reverting, so a shallow dip is not a dead trade.
+        # Raise the floor to -0.20R so we only kill trades that are truly
+        # dead (never profitable AND deep in loss), not just on the way down.
+        if wave.peak_r <= 0.05 and wave.live_r <= -0.20:
             return WaveAction(type="CLOSE", reason="flat_tape_exit", wave=wave, price=tick.price)
 
         # 0d. Hard loss-cut
