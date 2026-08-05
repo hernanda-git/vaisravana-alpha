@@ -16,7 +16,10 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vaisravana_alpha.core.params import ParameterSurface
 
 from vaisravana_alpha.core.models import Wave, WaveState, BiasReading, Candidate, Tick, TickContext
 from vaisravana_alpha.strategy.smc import SMCZoneCache
@@ -32,27 +35,8 @@ log = logging.getLogger(__name__)
 CONFIRM_MS = 0.25            # micro-confirmation (seconds) — matching wave bot
 CONF_EXIT_FLOOR = 0.20      # raised from 0.10 — only exit on real confidence collapse
 CONF_HOLD_MS = 1.0           # reduced from 0.3s for faster confidence exit
-COOLDOWN_S = float(os.getenv("VAISRAVANA_COOLDOWN_S", "120.0"))  # wall-clock seconds before same (pair, side) can re-enter.
-# Profit-bank arms: close when peak R reaches these levels.
-#
-# Data from 6 trades (post-fix v1): bank_08r at 0.23R = +$0.0189 (great!).
-# But max_age_fev still bleeding (2 trades, -$0.0345) because 0.15R is too
-# high — many trades never reach it and get killed by max_age_fev at a loss.
-# Lower BANK_R2 to 0.10R to catch more small wins before they turn negative.
-# Keep BANK_R at 0.20 for full close on strong runners.
-BANK_R = float(os.getenv("VAISRAVANA_BANK_R", "0.20"))       # full close at this peak R
-BANK_R2 = float(os.getenv("VAISRAVANA_BANK_R2", "0.10"))     # partial bank at this peak R
-# iter-7: cooldown was tick-based (600 ticks) but tick_cooldowns() ran once per
-# tick per PAIR, so with ~20 pairs it decayed ~20x too fast (INJ re-opened 4x in
-# 40s in run11). Wall-clock expiry makes the cooldown deterministic: 10 min.
-MAX_OPEN_WAVES = int(os.getenv("VAISRAVANA_MAX_OPEN_WAVES", "5"))  # reduced from 8 — fee bleed guard (counter-trade = more trades)
-BREAKEVEN_FLOOR_R = 0.20     # once peak_r >= this, SL moves to breakeven (tight enough to actually lock 0)
-# iter-counter-trade: LOSS_CUT_R too loose at 0.30 — BICOUSDT loss_cut at -0.49R
-# cost us $0.0463 in one trade. Tighten to 0.20R to prevent big single-trade losses.
-LOSS_CUT_R = float(os.getenv("VAISRAVANA_LOSS_CUT_R", "0.20"))  # was 0.30, tightened for counter-trade
 FLIP_STRENGTH = 0.35         # bias strength needed to confirm a flip (was 0.20 — too sensitive)
 PARTIAL_FRAC = 0.25          # fraction to trim on stall
-MAX_WAVE_AGE_S = int(os.getenv("VAISRAVANA_MAX_WAVE_AGE_S", "200"))  # 200s — balance reversion time vs fee bleed
 
 
 # ── Actions ───────────────────────────────────────────────────────────────────
@@ -76,6 +60,8 @@ class WaveManager:
     """TICK-DRIVEN wave lifecycle manager.
 
     No MAXHOLD. No global side locks. Per-wave cooldown only.
+    Reads exit/risk parameters from ParameterSurface when set, falling
+    back to hardcoded defaults for tests that construct a bare manager.
     """
 
     # In-memory state
@@ -86,6 +72,44 @@ class WaveManager:
 
     # DB connection (set externally)
     conn = None
+    # Parameter surface (set externally by runtime). When None, defaults are used.
+    surface: Optional["ParameterSurface"] = None
+
+    # ── Surface-backed parameter helpers ─────────────────────────────────
+
+    @property
+    def _exits(self):
+        """ExitRules from surface, or None if not wired."""
+        return getattr(self.surface, "exits", None) if self.surface else None
+
+    @property
+    def _risk(self):
+        """RiskLimits from surface, or None if not wired."""
+        return getattr(self.surface, "risk", None) if self.surface else None
+
+    @property
+    def _max_open_waves(self) -> int:
+        return self._risk.max_open_waves if self._risk else 5
+
+    @property
+    def _loss_cut_r(self) -> float:
+        return self._exits.loss_cut_r if self._exits else 0.20
+
+    @property
+    def _breakeven_floor_r(self) -> float:
+        return self._exits.breakeven_floor_r if self._exits else 0.20
+
+    @property
+    def _max_wave_age_s(self) -> float:
+        return self._exits.max_wave_age_s if self._exits else 200.0
+
+    @property
+    def _cooldown_s(self) -> float:
+        return self._exits.cooldown_s if self._exits else 120.0
+
+    @property
+    def _bank_r(self) -> float:
+        return self._exits.bank_r if self._exits else 0.20
 
     # ── Open ──────────────────────────────────────────────────────────────
 
@@ -186,7 +210,7 @@ class WaveManager:
         # In trending regimes: 2.0x ATR (wide TP, let runners go)
         # In range regimes: 1.5x ATR (tight TP, mean-reversion snaps back fast)
         atr = _atr_pct(ctx, candidate.tf)
-        regime_mult = 2.0 if regime_label == "trending" else 1.5
+        regime_mult = 2.0 if regime_label.startswith("trending") else 1.5
         tp_dist = max(ctx.price * 0.010, ctx.price * atr * regime_mult)
         risk = abs(wave.entry_price - wave.anchor)
         tp_dist = max(tp_dist, risk * 1.2)
@@ -194,8 +218,8 @@ class WaveManager:
             else (wave.entry_price - tp_dist)
 
         # Cap total open waves
-        if len(self.waves) >= MAX_OPEN_WAVES:
-            log.info("open skipped: %d open waves (cap %d)", len(self.waves), MAX_OPEN_WAVES)
+        if len(self.waves) >= self._max_open_waves:
+            log.info("open skipped: %d open waves (cap %d)", len(self.waves), self._max_open_waves)
             return None
 
         # Charge and persist the open fee. The fee is part of net economics.
@@ -255,7 +279,7 @@ class WaveManager:
             new_sl = entry + 0.6 * risk if wave.side == "BUY" else entry - 0.6 * risk
         elif wave.peak_r >= 0.6:
             new_sl = entry + 0.4 * risk if wave.side == "BUY" else entry - 0.4 * risk
-        elif wave.peak_r >= BREAKEVEN_FLOOR_R:
+        elif wave.peak_r >= self._breakeven_floor_r:
             new_sl = entry + 0.15 * risk if wave.side == "BUY" else entry - 0.15 * risk
         else:
             new_sl = None
@@ -344,7 +368,7 @@ class WaveManager:
             return WaveAction(type="CLOSE", reason="flat_tape_exit", wave=wave, price=tick.price)
 
         # 0d. Hard loss-cut
-        if wave.live_r <= -LOSS_CUT_R:
+        if wave.live_r <= -self._loss_cut_r:
             return WaveAction(type="CLOSE", reason="loss_cut", wave=wave, price=tick.price)
 
         # 1. Anchor hit
@@ -378,7 +402,7 @@ class WaveManager:
                 return WaveAction(type="CLOSE", reason="partial_profit", wave=wave, price=tick.price)
 
         # 5. Anti-stuck: force-close after MAX_WAVE_AGE_S
-        if wave.open_ts and (now - wave.open_ts) >= MAX_WAVE_AGE_S:
+        if wave.open_ts and (now - wave.open_ts) >= self._max_wave_age_s:
             return WaveAction(type="CLOSE", reason="max_age", wave=wave, price=tick.price)
 
         return None
@@ -424,7 +448,7 @@ class WaveManager:
 
         # Per-wave cooldown
         key = (wave.pair, wave.side)
-        self.cooldowns[key] = time.time() + COOLDOWN_S
+        self.cooldowns[key] = time.time() + self._cooldown_s
 
         # Clean up
         self.waves.pop(wave.wave_id, None)

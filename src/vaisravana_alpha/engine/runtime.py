@@ -118,6 +118,7 @@ class AlphaEngine:
         self.excluder = PairExcluder()
         self.manager = WaveManager()
         self.manager.conn = conn
+        self.manager.surface = surface
 
         self._feed: FeedMux | None = None
         self._poller: RestPoller | None = None

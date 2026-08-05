@@ -89,11 +89,17 @@ class EntryGates(BaseModel):
 class ExitRules(BaseModel):
     """When a wave dies. Loss-protection rules can only ever cut a loser."""
 
-    loss_cut_r: float = Field(default=0.35, ge=0.05, le=2.0)
+    loss_cut_r: float = Field(default=0.20, ge=0.05, le=2.0)
     breakeven_arm_r: float = Field(default=0.30, ge=0.05, le=2.0)
     reversal_arm_r: float = Field(default=0.20, ge=0.05, le=2.0)
     confidence_exit_floor: float = Field(default=0.16, ge=0.0, le=1.0)
-    cooldown_s: float = Field(default=600.0, ge=0.0, le=7200.0)
+    cooldown_s: float = Field(default=120.0, ge=0.0, le=7200.0)
+
+    # Profit-bank arms: close when peak R reaches these levels.
+    bank_r: float = Field(default=0.20, ge=0.05, le=2.0)       # full close at this peak R
+    bank_r2: float = Field(default=0.10, ge=0.05, le=2.0)     # partial bank at this peak R
+    breakeven_floor_r: float = Field(default=0.20, ge=0.05, le=2.0)  # once peak_r >= this, SL moves to breakeven
+    max_wave_age_s: float = Field(default=200.0, ge=0.0, le=7200.0)  # force-close after this age
 
 
 class RiskLimits(BaseModel):
