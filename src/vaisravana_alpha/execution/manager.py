@@ -323,8 +323,8 @@ class WaveManager:
             if wave.side == "SELL" and tick.price <= wave.tp_price:
                 return WaveAction(type="CLOSE", reason="tp_hit", wave=wave, price=tick.price)
 
-        # iter-B-promotion: bank_08r at 0.15R, tp05 at 0.30R
-        if wave.peak_r >= 0.15:
+        # iter-B-promotion: bank_08r at 0.20R, tp05 at 0.30R
+        if wave.peak_r >= 0.20:
             return WaveAction(type="CLOSE", reason="bank_08r", wave=wave, price=tick.price)
         if wave.peak_r >= 0.30:
             return WaveAction(type="CLOSE", reason="tp05_hit", wave=wave, price=tick.price)
@@ -338,9 +338,9 @@ class WaveManager:
         # and is deeply in loss. In counter-trade, price often goes -0.05 to
         # -0.08R before reverting, so a shallow dip is not a dead trade.
         # Data showed flat_tape_exit at -0.20R was too loose (13 trades,
-        # -$0.2468): tighten to -0.12R so dead trades exit sooner at a
+        # -$0.2468): tighten to -0.15R so dead trades exit sooner at a
         # smaller loss rather than bleeding to max_age or loss_cut.
-        if wave.peak_r <= 0.05 and wave.live_r <= -0.12:
+        if wave.peak_r <= 0.05 and wave.live_r <= -0.15:
             return WaveAction(type="CLOSE", reason="flat_tape_exit", wave=wave, price=tick.price)
 
         # 0d. Hard loss-cut
